@@ -49,5 +49,6 @@
       }
     ],
     "backend": { "kind": "wasm", "path": "dist/archive.wasm" }
-  }
+  },
+  "ui": { "type": "Page" }
 }
