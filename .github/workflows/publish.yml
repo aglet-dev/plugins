@@ -82,4 +82,6 @@ jobs:
           # aglet publish clone aglet-registry → 写 plugins/<id>/<ver>.aplugin
           # + meta.json + plugins/index.json → 开 PR 到 agent-rt/aglet-registry。
           export AGLET_REGISTRY_URL="https://github.com/agent-rt/aglet-registry.git"
-          aglet publish "${{ steps.target.outputs.plugin }}/plugin.json"
+          # plugin 走 `aglet plugin publish`（pack 成 .aplugin 写 plugins/<id>/）；
+          # 不要用 `aglet publish` 那是 aglet 包路径。
+          aglet plugin publish "${{ steps.target.outputs.plugin }}/plugin.json"
