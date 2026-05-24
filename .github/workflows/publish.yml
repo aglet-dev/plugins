@@ -75,8 +75,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_DIST_TOKEN }}
         run: |
           set -e
+          # gh auth setup-git 把 https://github.com/ 配上 credential helper，
+          # aglet publish 内部 git clone/push 才能 auth。否则 'could not read
+          # Username for github.com: Device not configured'.
+          gh auth setup-git
           # aglet publish clone aglet-registry → 写 plugins/<id>/<ver>.aplugin
           # + meta.json + plugins/index.json → 开 PR 到 agent-rt/aglet-registry。
-          # 用 https + GH_TOKEN（gh auth）；避免 ssh key 在 runner 上的配苦恼。
           export AGLET_REGISTRY_URL="https://github.com/agent-rt/aglet-registry.git"
           aglet publish "${{ steps.target.outputs.plugin }}/plugin.json"
