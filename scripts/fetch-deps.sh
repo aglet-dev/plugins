@@ -9,6 +9,8 @@
 #   ./scripts/fetch-deps.sh           # 全拉
 #   ./scripts/fetch-deps.sh zxing     # 只拉 zxing
 #   ./scripts/fetch-deps.sh webp      # 只拉 libwebp
+#
+# 不用 bash 4 associative array —— macOS 默认 bash 3.2 兼容。
 
 set -euo pipefail
 
@@ -16,20 +18,20 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/zig-pkg"
 mkdir -p "$VENDOR"
 
-# (name, hash, url)。hash 跟 aglet/build.zig.zon dependencies.* 完全一致。
-declare -A DEPS=(
-  [zxing]="N-V-__8AALGrMwDZ4Ry7UDuLwgq1EZDZbRbLN75PkGihtghn|https://github.com/zxing-cpp/zxing-cpp/archive/refs/tags/v3.0.2.tar.gz"
-  [webp]="N-V-__8AAGkrewARcKiSyLfJKsaW0ZoqHh4hzi4mTGwekxjk|https://github.com/webmproject/libwebp/archive/refs/tags/v1.6.0.tar.gz"
-)
+# hash 跟 aglet/build.zig.zon dependencies.* 完全一致。
+ZXING_HASH="N-V-__8AALGrMwDZ4Ry7UDuLwgq1EZDZbRbLN75PkGihtghn"
+ZXING_URL="https://github.com/zxing-cpp/zxing-cpp/archive/refs/tags/v3.0.2.tar.gz"
+
+WEBP_HASH="N-V-__8AAGkrewARcKiSyLfJKsaW0ZoqHh4hzi4mTGwekxjk"
+WEBP_URL="https://github.com/webmproject/libwebp/archive/refs/tags/v1.6.0.tar.gz"
 
 fetch_one() {
   local name="$1"
-  local entry="${DEPS[$name]}"
-  local hash="${entry%%|*}"
-  local url="${entry##*|}"
+  local hash="$2"
+  local url="$3"
   local target="$VENDOR/$hash"
 
-  if [[ -d "$target" ]] && [[ -n "$(ls -A "$target" 2>/dev/null)" ]]; then
+  if [ -d "$target" ] && [ -n "$(ls -A "$target" 2>/dev/null)" ]; then
     echo "[$name] already vendored at $target"
     return 0
   fi
@@ -40,16 +42,19 @@ fetch_one() {
   echo "[$name] ✓ ($(find "$target" -type f | wc -l | tr -d ' ') files)"
 }
 
-if [[ $# -eq 0 ]]; then
-  for name in "${!DEPS[@]}"; do
-    fetch_one "$name"
-  done
+dispatch() {
+  case "$1" in
+    zxing) fetch_one zxing "$ZXING_HASH" "$ZXING_URL" ;;
+    webp)  fetch_one webp  "$WEBP_HASH"  "$WEBP_URL" ;;
+    *) echo "unknown dep: $1 (known: zxing webp)" >&2; exit 1 ;;
+  esac
+}
+
+if [ $# -eq 0 ]; then
+  dispatch zxing
+  dispatch webp
 else
   for name in "$@"; do
-    if [[ -z "${DEPS[$name]:-}" ]]; then
-      echo "unknown dep: $name (known: ${!DEPS[*]})" >&2
-      exit 1
-    fi
-    fetch_one "$name"
+    dispatch "$name"
   done
 fi
