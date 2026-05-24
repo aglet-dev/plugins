@@ -5,8 +5,9 @@ name: Publish
 # （走 aglet CLI 的 publish 路径：写 plugins/<id>/<ver>.aplugin + meta.json
 # + index.json，开 PR 给 reviewer 审核）。
 #
-# 需要 secret：
-#   - GH_REGISTRY_TOKEN：PAT 有 agent-rt/aglet-registry 写权限 + open PR scope
+# 复用 agent-rt org 级 secret GH_DIST_TOKEN（已配，aglet 0.2.0 release.yml 也用
+# 这个推 homebrew-tap）。要求 token scope 含 aglet-registry contents:write +
+# pull_requests:write。
 
 on:
   push:
@@ -71,11 +72,11 @@ jobs:
 
       - name: aglet publish
         env:
-          GH_TOKEN: ${{ secrets.GH_REGISTRY_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_DIST_TOKEN }}
         run: |
           set -e
-          # aglet publish 会 clone aglet-registry、写 plugins/<id>/<ver>.aplugin
-          # + meta.json + index.json，开 PR 到 agent-rt/aglet-registry。
-          # AGLET_REGISTRY_URL 跟默认一致；这里显式说明。
-          export AGLET_REGISTRY_URL="git@github.com:agent-rt/aglet-registry.git"
+          # aglet publish clone aglet-registry → 写 plugins/<id>/<ver>.aplugin
+          # + meta.json + plugins/index.json → 开 PR 到 agent-rt/aglet-registry。
+          # 用 https + GH_TOKEN（gh auth）；避免 ssh key 在 runner 上的配苦恼。
+          export AGLET_REGISTRY_URL="https://github.com/agent-rt/aglet-registry.git"
           aglet publish "${{ steps.target.outputs.plugin }}/plugin.json"
