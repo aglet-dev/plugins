@@ -2,7 +2,7 @@
   "manifest": {
     "id": "archive",
     "name": "Archive",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "runtime": "json-ui-react",
     "plugin": true,
     "namespace": "archive",
@@ -18,7 +18,7 @@
       {
         "name": "list",
         "params": [
-          { "key": "bytes", "type": "bytes" }
+          { "key": "input_b64", "type": "string" }
         ],
         "result": [
           { "key": "entries", "type": "array" }
@@ -28,22 +28,22 @@
       {
         "name": "extract",
         "params": [
-          { "key": "bytes", "type": "bytes" },
-          { "key": "path", "type": "string" }
+          { "key": "input_b64", "type": "string" },
+          { "key": "path",      "type": "string" }
         ],
         "result": [
-          { "key": "bytes", "type": "bytes" }
+          { "key": "bytes_b64", "type": "string" }
         ],
         "permission": "archive:read"
       },
       {
         "name": "create",
         "params": [
-          { "key": "format", "type": "string" },
+          { "key": "format",  "type": "string" },
           { "key": "entries", "type": "array" }
         ],
         "result": [
-          { "key": "bytes", "type": "bytes" }
+          { "key": "output_b64", "type": "string" }
         ],
         "permission": "archive:write"
       }

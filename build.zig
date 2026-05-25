@@ -72,10 +72,21 @@ fn addZigPlugin(b: *std.Build, id: []const u8) *std.Build.Step {
         .cpu_arch = .wasm32,
         .os_tag = .wasi,
     });
+    // SDK module — shared across all Zig wasm plugins in this repo. Each
+    // plugin imports it as `@import("aglet_plugin_sdk")` for the marshaling
+    // helpers + dispatch runner.
+    const sdk_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/zig/plugin.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
     const mod = b.createModule(.{
         .root_source_file = b.path(b.fmt("{s}/src/wrapper.zig", .{id})),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "aglet_plugin_sdk", .module = sdk_mod },
+        },
     });
     const exe = b.addExecutable(.{
         .name = id,

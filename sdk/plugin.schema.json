@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aglet.dev/schemas/plugin.json",
+  "title": "Aglet plugin manifest",
+  "description": "Canonical shape of plugin.json. See sdk/README.md for a tour. The Aglet runtime applies stricter validation at install time; this schema covers the structural fields editor tooling and CI can check ahead of build.",
+  "type": "object",
+  "required": ["manifest", "ui"],
+  "additionalProperties": false,
+  "properties": {
+    "manifest": { "$ref": "#/$defs/manifest" },
+    "ui": {
+      "description": "Required by the host manifest validator. Plugins do not render UI, so this is a placeholder Page node.",
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "required": ["id", "name", "version", "runtime", "plugin", "namespace", "actions", "backend"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Plugin identifier. Lowercase, must start with a letter, kebab-case only."
+        },
+        "name": {
+          "$ref": "#/$defs/localized_string",
+          "description": "Display name. Plain string, or i18n object keyed by locale."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "description": "Semantic version (`MAJOR.MINOR.PATCH`, with optional pre-release / build metadata)."
+        },
+        "runtime": {
+          "const": "json-ui-react",
+          "description": "Manifest runtime tag. Plugins always use the React-shaped manifest schema even though they have no UI."
+        },
+        "plugin": {
+          "const": true,
+          "description": "Marks this manifest as a plugin (vs. a regular aglet)."
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Action namespace exposed to the host as `<namespace>.<action>`. Conventionally matches `id`."
+        },
+        "description": { "$ref": "#/$defs/localized_string" },
+        "keywords": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "license": { "type": "string" },
+        "homepage": {
+          "type": "string",
+          "format": "uri"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/action" }
+        },
+        "backend": { "$ref": "#/$defs/backend" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["name", "params", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$",
+          "description": "Action name. camelCase by convention; must be a valid JS identifier."
+        },
+        "params": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/field" }
+        },
+        "result": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/field" }
+        },
+        "permission": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*:[a-z][a-z0-9_*-]*$",
+          "description": "Permission token required to invoke this action, of the form `<namespace>:<verb>`. The caller's aglet manifest must list it under `permissions`. Optional — actions with no `permission` are unrestricted."
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": ["key", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "type": {
+          "enum": ["string", "integer", "number", "boolean", "array", "object"]
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "required": ["kind", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": ["wasm"],
+          "description": "Community plugins always ship as wasm. Static plugins (sysinfo / clipboard etc.) live in the Aglet runtime repo and use `kind: \"static\"` there; that variant is not allowed here."
+        },
+        "path": {
+          "type": "string",
+          "description": "Path to the compiled `.wasm`, relative to plugin.json. By convention `dist/<id>.wasm`."
+        }
+      }
+    },
+    "localized_string": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "required": ["default"],
+          "additionalProperties": { "type": "string" },
+          "properties": {
+            "default": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -3,6 +3,7 @@ name: Validate
 on:
   pull_request:
     paths:
+      - "**/*.zig"
       - "**/*.cpp"
       - "**/*.h"
       - "**/CMakeLists.txt"
@@ -32,11 +33,5 @@ jobs:
 
       - name: Build
         run: zig build
-
-      - name: Upload wasm
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-${{ github.sha }}
-          path: "*/dist/*.wasm"
-          retention-days: 14
+        # Publishing is owned by publish.yml (triggered by a `<plugin>-v<ver>`
+        # tag). This workflow only proves the tree builds.

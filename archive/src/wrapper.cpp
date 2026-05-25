@@ -1,171 +1,37 @@
-// archive plugin —— libarchive standalone wasm wrapper.
+// archive plugin — libarchive standalone wasm wrapper.
 //
-// 协议（JSON in/out）：
-//   list({input_b64}) → {ok: true, entries: [{path, size, is_dir, mtime?}]}
-//   extract({input_b64, path}) → {ok: true, bytes_b64}
-//   create({format, entries: [{path, bytes_b64}]}) → {ok: true, output_b64}
+// Protocol (JSON in/out):
+//   list({input_b64})               → {entries: [{path, size, is_dir, mtime}, ...]}
+//   extract({input_b64, path})      → {bytes_b64}
+//   create({format, entries: [{path, bytes_b64}, ...]})
+//                                    → {output_b64}
 //     format ∈ {"zip", "tar", "tar.gz"}
 //
-// Read formats: zip / tar / tar.{gz,bz2} / rar (4 + 5) / ar / cpio / iso /
-//   mtree / 7z (without lzma; will fail). libarchive's archive_read_support_*_all
-//   enables every format / filter compiled in.
+// Supported read formats: zip / tar / tar.{gz,bz2} / rar (4 + 5) / ar / cpio /
+// iso / mtree / 7z (without lzma; will fail). libarchive's
+// `archive_read_support_*_all` enables every format / filter compiled in.
+//
+// Built on `aglet_plugin_sdk` (sdk/c/aglet_plugin.h): the SDK owns the
+// alloc/free/dispatch wasm exports, JSON parsing, base64 encoding, and
+// error envelopes.
+
+#include <aglet_plugin.h>
 
 #include <cstdint>
-#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "archive.h"
 #include "archive_entry.h"
 
-// ─── C ABI ────────────────────────────────────────────────────────────────────
+// ─── action handlers ────────────────────────────────────────────────────────
 
-extern "C" {
-
-__attribute__((export_name("alloc")))
-uint32_t plugin_alloc(uint32_t n) {
-    return (uint32_t)(uintptr_t)std::malloc(n ? n : 1);
-}
-
-__attribute__((export_name("free")))
-void plugin_free(uint32_t p, uint32_t n) {
-    (void)n; std::free((void*)(uintptr_t)p);
-}
-
-uint64_t plugin_dispatch(uint32_t ap, uint32_t al, uint32_t pp, uint32_t pl);
-
-__attribute__((export_name("dispatch")))
-uint64_t plugin_dispatch_export(uint32_t ap, uint32_t al, uint32_t pp, uint32_t pl) {
-    return plugin_dispatch(ap, al, pp, pl);
-}
-
-}
-
-// ─── tiny JSON helpers (string-scan; not robust to escapes inside keys) ────
-
-static bool jsonFindKey(const std::string& s, const std::string& key, size_t& vs) {
-    std::string k = "\"" + key + "\"";
-    size_t i = s.find(k);
-    if (i == std::string::npos) return false;
-    i += k.size();
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == ':')) i++;
-    vs = i; return true;
-}
-
-static std::string jsonGetString(const std::string& s, const std::string& key, const std::string& d = "") {
-    size_t i; if (!jsonFindKey(s, key, i) || i >= s.size() || s[i] != '"') return d;
-    i++; std::string out;
-    while (i < s.size() && s[i] != '"') {
-        if (s[i] == '\\' && i + 1 < s.size()) {
-            char c = s[i+1];
-            if (c == 'n') out += '\n';
-            else if (c == 't') out += '\t';
-            else if (c == 'r') out += '\r';
-            else out += c;
-            i += 2;
-        } else { out += s[i++]; }
-    }
-    return out;
-}
-
-static bool jsonFindArray(const std::string& s, const std::string& key, size_t& aStart, size_t& aEnd) {
-    size_t i; if (!jsonFindKey(s, key, i)) return false;
-    if (i >= s.size() || s[i] != '[') return false;
-    int depth = 1; size_t j = i + 1;
-    while (j < s.size() && depth > 0) {
-        if (s[j] == '[') depth++;
-        else if (s[j] == ']') depth--;
-        else if (s[j] == '"') { j++; while (j < s.size() && s[j] != '"') { if (s[j]=='\\') j++; j++; } }
-        j++;
-    }
-    if (depth != 0) return false;
-    aStart = i + 1; aEnd = j - 1;
-    return true;
-}
-
-static std::vector<std::string> jsonSplitObjArray(const std::string& s, size_t a, size_t b) {
-    std::vector<std::string> out;
-    size_t i = a;
-    while (i < b) {
-        while (i < b && (s[i] == ' ' || s[i] == ',' || s[i] == '\n' || s[i] == '\t')) i++;
-        if (i >= b || s[i] != '{') break;
-        int depth = 1; size_t st = i; i++;
-        while (i < b && depth > 0) {
-            if (s[i] == '{') depth++;
-            else if (s[i] == '}') depth--;
-            else if (s[i] == '"') { i++; while (i < b && s[i] != '"') { if (s[i]=='\\') i++; i++; } }
-            i++;
-        }
-        out.push_back(s.substr(st, i - st));
-    }
-    return out;
-}
-
-// JSON-escape a string for output (handle quotes, backslash, control chars).
-static std::string jsonEscape(const std::string& s) {
-    std::string o; o.reserve(s.size() + 2);
-    for (unsigned char c : s) {
-        if (c == '"' || c == '\\') { o += '\\'; o += (char)c; }
-        else if (c == '\n') o += "\\n";
-        else if (c == '\r') o += "\\r";
-        else if (c == '\t') o += "\\t";
-        else if (c < 0x20) {
-            char buf[8]; std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-            o += buf;
-        } else { o += (char)c; }
-    }
-    return o;
-}
-
-// ─── base64 ─────────────────────────────────────────────────────────────────
-
-static const char b64c[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static std::string b64Encode(const uint8_t* d, size_t n) {
-    std::string o; o.reserve(((n + 2) / 3) * 4);
-    size_t i = 0;
-    while (i + 3 <= n) {
-        uint32_t v = (d[i]<<16)|(d[i+1]<<8)|d[i+2];
-        o += b64c[(v>>18)&63]; o += b64c[(v>>12)&63];
-        o += b64c[(v>>6)&63]; o += b64c[v&63]; i += 3;
-    }
-    if (i < n) {
-        uint32_t v = d[i] << 16; if (i+1 < n) v |= d[i+1] << 8;
-        o += b64c[(v>>18)&63]; o += b64c[(v>>12)&63];
-        o += (i+1 < n ? b64c[(v>>6)&63] : '='); o += '=';
-    }
-    return o;
-}
-
-static std::vector<uint8_t> b64Decode(const std::string& s) {
-    int rev[256]; for (int i = 0; i < 256; i++) rev[i] = -1;
-    for (int i = 0; i < 64; i++) rev[(int)b64c[i]] = i;
-    std::vector<uint8_t> out; out.reserve(s.size() * 3 / 4);
-    int bits = 0, nbits = 0;
-    for (char c : s) {
-        if (c == '=' || c == '\n' || c == '\r' || c == ' ') continue;
-        int v = rev[(unsigned char)c]; if (v < 0) continue;
-        bits = (bits << 6) | v; nbits += 6;
-        if (nbits >= 8) { nbits -= 8; out.push_back((bits >> nbits) & 0xFF); }
-    }
-    return out;
-}
-
-// ─── result helpers ────────────────────────────────────────────────────────
-
-static std::string err(const char* code, const std::string& msg) {
-    return std::string("{\"ok\":false,\"error\":{\"code\":\"") + code +
-           "\",\"message\":\"" + jsonEscape(msg) + "\"}}";
-}
-
-// ─── actions ───────────────────────────────────────────────────────────────
-
-static std::string doList(const std::string& params) {
-    std::string input_b64 = jsonGetString(params, "input_b64");
-    if (input_b64.empty()) return err("INVALID_PARAMS", "input_b64 required");
-    auto bytes = b64Decode(input_b64);
-    if (bytes.empty()) return err("INVALID_PARAMS", "bad base64");
+static std::string doList(const aglet::Params& p) {
+    auto bytes = p.bytes("input_b64");
+    if (bytes.empty()) return aglet::errInvalid("input_b64 required (non-empty)");
 
     struct archive* a = archive_read_new();
     archive_read_support_format_all(a);
@@ -173,42 +39,51 @@ static std::string doList(const std::string& params) {
 
     int r = archive_read_open_memory(a, bytes.data(), bytes.size());
     if (r != ARCHIVE_OK) {
-        std::string msg = archive_error_string(a) ? archive_error_string(a) : "open failed";
+        const char* msg = archive_error_string(a);
+        std::string err_msg = msg ? msg : "open failed";
         archive_read_free(a);
-        return err("OPEN_FAILED", msg);
+        return aglet::err("OPEN_FAILED", err_msg);
     }
 
-    std::string out = "{\"ok\":true,\"entries\":[";
+    // Build the `entries` array as a JSON fragment, then attach it to the
+    // Result builder via `raw()`.
+    std::string entries = "[";
     bool first = true;
     struct archive_entry* entry;
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-        if (!first) out += ",";
+        if (!first) entries += ",";
         first = false;
+
         const char* path = archive_entry_pathname(entry);
-        if (!path) path = "";
         int64_t size = archive_entry_size(entry);
         bool is_dir = archive_entry_filetype(entry) == AE_IFDIR;
         int64_t mtime = archive_entry_mtime(entry);
-        char buf[128];
-        std::snprintf(buf, sizeof(buf),
-            ",\"size\":%lld,\"is_dir\":%s,\"mtime\":%lld",
-            (long long)size, is_dir ? "true" : "false", (long long)mtime);
-        out += "{\"path\":\"" + jsonEscape(path) + "\"" + buf + "}";
+
+        char tail[128];
+        std::snprintf(tail, sizeof(tail),
+            ",\"size\":%lld,\"is_dir\":%s,\"mtime\":%lld}",
+            static_cast<long long>(size),
+            is_dir ? "true" : "false",
+            static_cast<long long>(mtime));
+
+        entries += "{\"path\":\"";
+        entries += aglet::jsonEscape(path ? path : "");
+        entries += "\"";
+        entries += tail;
+
         archive_read_data_skip(a);
     }
-    out += "]}";
+    entries += "]";
 
     archive_read_free(a);
-    return out;
+    return aglet::Result::ok().raw("entries", entries);
 }
 
-static std::string doExtract(const std::string& params) {
-    std::string input_b64 = jsonGetString(params, "input_b64");
-    std::string target_path = jsonGetString(params, "path");
-    if (input_b64.empty()) return err("INVALID_PARAMS", "input_b64 required");
-    if (target_path.empty()) return err("INVALID_PARAMS", "path required");
-    auto bytes = b64Decode(input_b64);
-    if (bytes.empty()) return err("INVALID_PARAMS", "bad base64");
+static std::string doExtract(const aglet::Params& p) {
+    auto bytes = p.bytes("input_b64");
+    if (bytes.empty()) return aglet::errInvalid("input_b64 required (non-empty)");
+    std::string target_path = p.strOr("path", "");
+    if (target_path.empty()) return aglet::errInvalid("path required");
 
     struct archive* a = archive_read_new();
     archive_read_support_format_all(a);
@@ -216,9 +91,10 @@ static std::string doExtract(const std::string& params) {
 
     int r = archive_read_open_memory(a, bytes.data(), bytes.size());
     if (r != ARCHIVE_OK) {
-        std::string msg = archive_error_string(a) ? archive_error_string(a) : "open failed";
+        const char* msg = archive_error_string(a);
+        std::string err_msg = msg ? msg : "open failed";
         archive_read_free(a);
-        return err("OPEN_FAILED", msg);
+        return aglet::err("OPEN_FAILED", err_msg);
     }
 
     struct archive_entry* entry;
@@ -229,13 +105,16 @@ static std::string doExtract(const std::string& params) {
         if (path && target_path == path) {
             found = true;
             int64_t size = archive_entry_size(entry);
-            if (size > 0) data.reserve((size_t)size);
+            if (size > 0) data.reserve(static_cast<size_t>(size));
             const void* buf;
             size_t len;
             la_int64_t offset;
             while (archive_read_data_block(a, &buf, &len, &offset) == ARCHIVE_OK) {
-                if (offset > (la_int64_t)data.size()) data.resize((size_t)offset);
-                data.insert(data.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
+                if (offset > static_cast<la_int64_t>(data.size()))
+                    data.resize(static_cast<size_t>(offset));
+                data.insert(data.end(),
+                            static_cast<const uint8_t*>(buf),
+                            static_cast<const uint8_t*>(buf) + len);
             }
             break;
         }
@@ -243,25 +122,54 @@ static std::string doExtract(const std::string& params) {
     }
     archive_read_free(a);
 
-    if (!found) return err("NOT_FOUND", "path not in archive: " + target_path);
-    return "{\"ok\":true,\"bytes_b64\":\"" + b64Encode(data.data(), data.size()) + "\"}";
+    if (!found) return aglet::err("NOT_FOUND", "path not in archive: " + target_path);
+    return aglet::Result::ok().bytes("bytes_b64", data);
 }
 
-// libarchive expects open/write/close callbacks for streaming output.
+// libarchive uses an open/write/close callback model for streaming output.
 struct WriteCtx { std::vector<uint8_t> out; };
+
 static la_ssize_t writeCb(struct archive*, void* ud, const void* buf, size_t n) {
-    auto* w = (WriteCtx*)ud;
-    w->out.insert(w->out.end(), (const uint8_t*)buf, (const uint8_t*)buf + n);
-    return (la_ssize_t)n;
+    auto* w = static_cast<WriteCtx*>(ud);
+    w->out.insert(w->out.end(),
+                  static_cast<const uint8_t*>(buf),
+                  static_cast<const uint8_t*>(buf) + n);
+    return static_cast<la_ssize_t>(n);
 }
 
-static std::string doCreate(const std::string& params) {
-    std::string format = jsonGetString(params, "format", "tar.gz");
-    size_t aStart, aEnd;
-    if (!jsonFindArray(params, "entries", aStart, aEnd)) {
-        return err("INVALID_PARAMS", "entries array required");
+/// Split an array-of-objects substring at top-level commas, returning each
+/// `{...}` element as a substring suitable for `aglet::Params`.
+static std::vector<std::string_view> splitObjArray(std::string_view src, size_t a, size_t b) {
+    std::vector<std::string_view> out;
+    size_t i = a;
+    while (i < b) {
+        while (i < b && (src[i] == ' ' || src[i] == ',' || src[i] == '\n' || src[i] == '\t')) i++;
+        if (i >= b || src[i] != '{') break;
+        int depth = 1;
+        size_t start = i;
+        i++;
+        while (i < b && depth > 0) {
+            char c = src[i];
+            if (c == '{') depth++;
+            else if (c == '}') depth--;
+            else if (c == '"') {
+                i++;
+                while (i < b && src[i] != '"') {
+                    if (src[i] == '\\' && i + 1 < b) i++;
+                    i++;
+                }
+            }
+            i++;
+        }
+        out.emplace_back(src.data() + start, i - start);
     }
-    auto items = jsonSplitObjArray(params, aStart, aEnd);
+    return out;
+}
+
+static std::string doCreate(const aglet::Params& p) {
+    std::string format = p.strOr("format", "tar.gz");
+    auto entries_range = p.findArray("entries");
+    if (!entries_range) return aglet::errInvalid("entries array required");
 
     struct archive* a = archive_write_new();
     if (format == "zip") {
@@ -273,50 +181,46 @@ static std::string doCreate(const std::string& params) {
         archive_write_add_filter_gzip(a);
     } else {
         archive_write_free(a);
-        return err("INVALID_PARAMS", "format must be zip / tar / tar.gz");
+        return aglet::errInvalid("format must be zip / tar / tar.gz");
     }
 
     WriteCtx ctx;
     archive_write_open(a, &ctx, nullptr, writeCb, nullptr);
 
-    for (auto& item : items) {
-        std::string path = jsonGetString(item, "path");
-        std::string b64 = jsonGetString(item, "bytes_b64");
+    auto [start, end] = *entries_range;
+    for (auto entry_json : splitObjArray(p.raw(), start, end)) {
+        aglet::Params item(entry_json);
+        std::string path = item.strOr("path", "");
         if (path.empty()) continue;
-        auto data = b64Decode(b64);
+        auto data = item.bytes("bytes_b64");
 
-        struct archive_entry* entry = archive_entry_new();
-        archive_entry_set_pathname(entry, path.c_str());
-        archive_entry_set_size(entry, (la_int64_t)data.size());
-        archive_entry_set_filetype(entry, AE_IFREG);
-        archive_entry_set_perm(entry, 0644);
-        archive_write_header(a, entry);
+        struct archive_entry* archive_entry = archive_entry_new();
+        archive_entry_set_pathname(archive_entry, path.c_str());
+        archive_entry_set_size(archive_entry, static_cast<la_int64_t>(data.size()));
+        archive_entry_set_filetype(archive_entry, AE_IFREG);
+        archive_entry_set_perm(archive_entry, 0644);
+        archive_write_header(a, archive_entry);
         if (!data.empty()) {
             archive_write_data(a, data.data(), data.size());
         }
-        archive_entry_free(entry);
+        archive_entry_free(archive_entry);
     }
 
     archive_write_close(a);
     archive_write_free(a);
 
-    return "{\"ok\":true,\"output_b64\":\"" + b64Encode(ctx.out.data(), ctx.out.size()) + "\"}";
+    return aglet::Result::ok().bytes("output_b64", ctx.out);
 }
 
 // ─── dispatch ────────────────────────────────────────────────────────────────
 
-uint64_t plugin_dispatch(uint32_t ap, uint32_t al, uint32_t pp, uint32_t pl) {
-    std::string action((const char*)(uintptr_t)ap, al);
-    std::string params((const char*)(uintptr_t)pp, pl);
-
-    std::string out;
-    if (action == "list")         out = doList(params);
-    else if (action == "extract") out = doExtract(params);
-    else if (action == "create")  out = doCreate(params);
-    else out = err("UNKNOWN_ACTION", std::string("archive.") + action);
-
-    size_t n = out.size();
-    char* buf = (char*)std::malloc(n ? n : 1);
-    if (n) std::memcpy(buf, out.data(), n);
-    return ((uint64_t)(uint32_t)(uintptr_t)buf << 32) | (uint64_t)n;
+std::string aglet_dispatch_action(std::string_view action,
+                                  std::string_view params_json) {
+    aglet::Params p(params_json);
+    if (action == "list")    return doList(p);
+    if (action == "extract") return doExtract(p);
+    if (action == "create")  return doCreate(p);
+    return aglet::errUnknown(std::string("archive.") + std::string(action));
 }
+
+AGLET_PLUGIN_EXPORTS

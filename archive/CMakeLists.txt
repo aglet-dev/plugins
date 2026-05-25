@@ -62,7 +62,11 @@ set(CMAKE_EXE_LINKER_FLAGS
      -s INITIAL_MEMORY=16MB \
      -Wl,--no-entry")
 
+# Aglet plugin SDK (header-only) — sits at ../sdk/c/ in the repo.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../sdk/c
+                 ${CMAKE_BINARY_DIR}/aglet_plugin_sdk_c)
+
 add_executable(archive src/wrapper.cpp)
 target_include_directories(archive PRIVATE ${LIBARCHIVE_ROOT}/libarchive)
-target_link_libraries(archive PRIVATE archive_static)
+target_link_libraries(archive PRIVATE archive_static aglet_plugin_sdk_c)
 set_target_properties(archive PROPERTIES SUFFIX ".wasm")
