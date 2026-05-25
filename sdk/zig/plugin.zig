@@ -115,38 +115,43 @@ pub fn parseParams(arena: std.mem.Allocator, json: []const u8) !Params {
 
 // ─── Result builders ──────────────────────────────────────────────────────
 //
-// All builders allocate from the supplied arena. By convention, binary
-// payloads in the JSON result are standard-base64 strings under `<key>_b64`
-// field names; the host runtime expects this for any byte slice.
+// All builders allocate from the supplied arena and produce the canonical
+// success envelope `{"ok":true,"data":{ ... }}`. Fields land inside `data`
+// so that the host's JS bridge (which returns `resp.data` to the caller)
+// surfaces them at the expected shape.
+//
+// Binary payloads should use `<key>_b64` field names and be encoded with
+// `sdk.encodeB64` / `okBytes`.
 
 pub fn okBytes(arena: std.mem.Allocator, key: []const u8, raw: []const u8) ![]const u8 {
     const b64 = try encodeB64(arena, raw);
     return std.fmt.allocPrint(arena,
-        "{{\"ok\":true,\"{s}\":\"{s}\"}}", .{ key, b64 });
+        "{{\"ok\":true,\"data\":{{\"{s}\":\"{s}\"}}}}", .{ key, b64 });
 }
 
 pub fn okStr(arena: std.mem.Allocator, key: []const u8, s: []const u8) ![]const u8 {
     return std.fmt.allocPrint(arena,
-        "{{\"ok\":true,\"{s}\":\"{s}\"}}", .{ key, s });
+        "{{\"ok\":true,\"data\":{{\"{s}\":\"{s}\"}}}}", .{ key, s });
 }
 
 pub fn okBool(arena: std.mem.Allocator, key: []const u8, b: bool) ![]const u8 {
     return std.fmt.allocPrint(arena,
-        "{{\"ok\":true,\"{s}\":{s}}}", .{ key, if (b) "true" else "false" });
+        "{{\"ok\":true,\"data\":{{\"{s}\":{s}}}}}", .{ key, if (b) "true" else "false" });
 }
 
 pub fn okInt(arena: std.mem.Allocator, key: []const u8, i: i64) ![]const u8 {
     return std.fmt.allocPrint(arena,
-        "{{\"ok\":true,\"{s}\":{d}}}", .{ key, i });
+        "{{\"ok\":true,\"data\":{{\"{s}\":{d}}}}}", .{ key, i });
 }
 
-/// Multi-field result: `{ok:true, k1: v1, k2: v2, ...}`. Field names are
-/// taken from the struct field names; values are serialized by Zig type:
+/// Multi-field result wrapped in the canonical `{ok:true,data:{...}}` envelope.
+/// Field names come from the struct field names; values are serialized by
+/// Zig type:
 ///   `[]const u8` / `[]u8` → JSON string
 ///   `bool` → true/false literal
 ///   integer / float → numeric literal
 ///
-/// For binary data, encode to base64 first and pass the b64 string:
+/// Encode binary data to base64 before passing:
 ///     return sdk.ok(p.arena, .{
 ///         .ciphertext_b64 = try sdk.encodeB64(p.arena, &ct),
 ///         .nonce_b64 = try sdk.encodeB64(p.arena, &nonce),
@@ -154,9 +159,14 @@ pub fn okInt(arena: std.mem.Allocator, key: []const u8, i: i64) ![]const u8 {
 pub fn ok(arena: std.mem.Allocator, fields: anytype) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(arena);
-    try buf.appendSlice(arena, "{\"ok\":true");
+    try buf.appendSlice(arena, "{\"ok\":true,\"data\":{");
+    var first = true;
     inline for (std.meta.fields(@TypeOf(fields))) |f| {
-        try buf.append(arena, ',');
+        if (first) {
+            first = false;
+        } else {
+            try buf.append(arena, ',');
+        }
         try buf.append(arena, '"');
         try buf.appendSlice(arena, f.name);
         try buf.appendSlice(arena, "\":");
@@ -182,7 +192,7 @@ pub fn ok(arena: std.mem.Allocator, fields: anytype) ![]const u8 {
             else => @compileError("sdk.ok: unsupported type for field '" ++ f.name ++ "': " ++ @typeName(T)),
         }
     }
-    try buf.append(arena, '}');
+    try buf.appendSlice(arena, "}}");
     return try arena.dupe(u8, buf.items);
 }
 

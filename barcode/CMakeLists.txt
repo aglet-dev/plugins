@@ -65,6 +65,10 @@ set(CMAKE_EXE_LINKER_FLAGS
 # 注：alloc / free / dispatch 三 export 走 wrapper.cpp 的
 # __attribute__((export_name(...)))，linker 不用单独 --export=。
 
+# Aglet plugin SDK (header-only) — sits at ../sdk/c/ in the repo.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../sdk/c
+                 ${CMAKE_BINARY_DIR}/aglet_plugin_sdk_c)
+
 add_executable(barcode src/wrapper.cpp)
-target_link_libraries(barcode ZXing::ZXing stb::stb)
+target_link_libraries(barcode ZXing::ZXing stb::stb aglet_plugin_sdk_c)
 set_target_properties(barcode PROPERTIES SUFFIX ".wasm")

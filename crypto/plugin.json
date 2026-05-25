@@ -2,7 +2,7 @@
   "manifest": {
     "id": "crypto",
     "name": "Crypto",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "runtime": "json-ui-react",
     "plugin": true,
     "namespace": "crypto",
