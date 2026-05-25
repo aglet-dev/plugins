@@ -139,6 +139,12 @@
           "uniqueItems": true,
           "description": "Wasm backends only: allowlist of WASI / emscripten host stubs the plugin imports. Each entry is a fully-qualified `<module>.<name>` from the host's STUB_TABLE — review process gates additions. New plugins should declare exactly what they need so unintended imports fail loud at instantiate."
         },
+        "emits": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "description": "Stdio backends only: resource URIs the plugin publishes via `notifications/resources/updated`. The host auto-`resources/subscribe`s to each URI on plugin load; arriving notifications are fanned out to aglets as `<namespace>.<uri>` events. URIs are plugin-defined (no closed enum) — keep them short kebab/dot tokens like `cpu`, `net.rx`."
+        },
         "capabilities": {
           "type": "array",
           "items": {

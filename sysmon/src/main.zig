@@ -26,6 +26,21 @@ const stderr_fd: posix.fd_t = 2;
 
 // zig 0.16 std.posix dropped `write` (kept only `read`); call libc directly.
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+extern "c" fn usleep(usec: c_uint) c_int;
+
+// ── pthread bindings (zig 0.16 std.Thread has no Mutex) ───────────────
+// Mirror the host's stdio_plugin Mutex pattern — the plugin needs to guard
+// stdout writes between the main request/response loop and the background
+// emitter thread.
+const pthread_t = std.c.pthread_t;
+const pthread_mutex_t = std.c.pthread_mutex_t;
+extern "c" fn pthread_create(thread: *pthread_t, attr: ?*anyopaque, start_routine: *const fn (?*anyopaque) callconv(.c) ?*anyopaque, arg: ?*anyopaque) c_int;
+extern "c" fn pthread_detach(thread: pthread_t) c_int;
+extern "c" fn pthread_mutex_lock(m: *pthread_mutex_t) c_int;
+extern "c" fn pthread_mutex_unlock(m: *pthread_mutex_t) c_int;
+
+var stdout_mu: pthread_mutex_t = .{};
+var emitter_started: bool = false;
 
 fn libcWrite(fd: posix.fd_t, buf: []const u8) !usize {
     const n = write(fd, buf.ptr, buf.len);
@@ -82,6 +97,10 @@ fn readFramed(alloc: std.mem.Allocator) ![]u8 {
 fn writeFramed(body: []const u8) !void {
     var hdr: [64]u8 = undefined;
     const h = try std.fmt.bufPrint(&hdr, "Content-Length: {d}\r\n\r\n", .{body.len});
+    // Guard stdout — the emitter thread (resources/subscribe) writes the
+    // ticker notifications concurrently with the main loop's responses.
+    _ = pthread_mutex_lock(&stdout_mu);
+    defer _ = pthread_mutex_unlock(&stdout_mu);
     try writeAll(h);
     try writeAll(body);
 }
@@ -378,6 +397,40 @@ fn extractIdRaw(json: []const u8) []const u8 {
     return json[start..i];
 }
 
+// ── ticker emitter ────────────────────────────────────────────────────
+//
+// Spawned on first resources/subscribe (uri="cpu"). Emits a
+// notifications/resources/updated frame every ~1s with the latest CPU
+// sample. v1: emit unconditionally for the process lifetime; no
+// unsubscribe handling. Reentry-safe via the `emitter_started` flag.
+
+fn emitterLoop(_: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const backing = std.heap.smp_allocator;
+    while (true) {
+        _ = usleep(1_000_000); // 1s
+        var arena_state = std.heap.ArenaAllocator.init(backing);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const sample = cpuSample();
+        var body: Buf = .empty;
+        defer body.deinit(arena);
+        body.appendSlice(arena,
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"cpu\",\"contents\":") catch continue;
+        writeCpuJson(&body, arena, sample) catch continue;
+        body.appendSlice(arena, "}}") catch continue;
+        writeFramed(body.items) catch break;
+    }
+    return null;
+}
+
+fn startEmitter() void {
+    if (emitter_started) return;
+    var tid: pthread_t = undefined;
+    if (pthread_create(&tid, null, emitterLoop, null) != 0) return;
+    _ = pthread_detach(tid);
+    emitter_started = true;
+}
+
 fn handleMessage(arena: std.mem.Allocator, msg: []const u8) !void {
     const method = extractStringField(msg, "method") orelse return;
     const id = extractIdRaw(msg);
@@ -386,13 +439,31 @@ fn handleMessage(arena: std.mem.Allocator, msg: []const u8) !void {
         var resp: Buf = .empty;
         defer resp.deinit(arena);
         try resp.print(arena,
-            "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{\"tools\":{{\"listChanged\":false}}}},\"serverInfo\":{{\"name\":\"sysmon\",\"version\":\"0.1.0\"}}}}}}",
+            "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{\"tools\":{{\"listChanged\":false}}}},\"serverInfo\":{{\"name\":\"sysmon\",\"version\":\"0.2.0\"}}}}}}",
             .{id},
         );
         try writeFramed(resp.items);
         return;
     }
     if (std.mem.eql(u8, method, "notifications/initialized")) return;
+    if (std.mem.eql(u8, method, "resources/subscribe")) {
+        // Spawn the emitter thread (idempotent) and ack. We don't track
+        // per-URI subscribers — first subscribe to any URI starts the
+        // single global ticker on "cpu".
+        startEmitter();
+        var resp: Buf = .empty;
+        defer resp.deinit(arena);
+        try resp.print(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{}}}}", .{id});
+        try writeFramed(resp.items);
+        return;
+    }
+    if (std.mem.eql(u8, method, "resources/unsubscribe")) {
+        var resp: Buf = .empty;
+        defer resp.deinit(arena);
+        try resp.print(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{}}}}", .{id});
+        try writeFramed(resp.items);
+        return;
+    }
     if (std.mem.eql(u8, method, "tools/call")) {
         const tool = extractStringField(msg, "name") orelse {
             try writeError(arena, id, -32602, "missing tool name");
