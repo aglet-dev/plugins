@@ -19,19 +19,37 @@ pub fn build(b: *std.Build) void {
     const zxing = b.dependency("zxing_cpp", .{}).path("");
     const webp = b.dependency("libwebp", .{}).path("");
     const archive_dep = b.dependency("libarchive", .{}).path("");
+    const xz_dep = b.dependency("xz", .{}).path("");
+    const zstd_dep = b.dependency("zstd", .{}).path("");
 
-    all.dependOn(addCmakePlugin(b, .{ .id = "barcode", .dep_env = "ZXING_CPP_ROOT", .dep_path = zxing }));
-    all.dependOn(addCmakePlugin(b, .{ .id = "image", .dep_env = "LIBWEBP_ROOT", .dep_path = webp }));
-    all.dependOn(addCmakePlugin(b, .{ .id = "archive", .dep_env = "LIBARCHIVE_ROOT", .dep_path = archive_dep }));
+    all.dependOn(addCmakePlugin(b, .{ .id = "barcode", .deps = &.{
+        .{ .env = "ZXING_CPP_ROOT", .path = zxing },
+    } }));
+    all.dependOn(addCmakePlugin(b, .{ .id = "image", .deps = &.{
+        .{ .env = "LIBWEBP_ROOT", .path = webp },
+    } }));
+    all.dependOn(addCmakePlugin(b, .{ .id = "archive", .deps = &.{
+        .{ .env = "LIBARCHIVE_ROOT", .path = archive_dep },
+        .{ .env = "XZ_ROOT", .path = xz_dep },
+        .{ .env = "ZSTD_ROOT", .path = zstd_dep },
+    } }));
 
     // ── Pure-zig plugins (wasm32-wasi via std.crypto / stdlib) ─────────────
     all.dependOn(addZigPlugin(b, "crypto"));
 }
 
+const CmakeDep = struct {
+    env: []const u8,
+    path: std.Build.LazyPath,
+};
+
 const CmakeSpec = struct {
     id: []const u8,
-    dep_env: []const u8,
-    dep_path: std.Build.LazyPath,
+    /// Env vars to set when invoking `emcmake cmake -S <id>`. Each entry
+    /// gets `<env>=<resolved path>` so the CMakeLists can `$ENV{<env>}` it.
+    /// Used for vendoring sibling-source dependencies (libarchive needs
+    /// LIBARCHIVE_ROOT + XZ_ROOT + ZSTD_ROOT, others typically need one).
+    deps: []const CmakeDep,
 };
 
 fn addCmakePlugin(b: *std.Build, spec: CmakeSpec) *std.Build.Step {
@@ -41,7 +59,9 @@ fn addCmakePlugin(b: *std.Build, spec: CmakeSpec) *std.Build.Step {
     const configure = b.addSystemCommand(&.{ "emcmake", "cmake", "-S", b.pathFromRoot(spec.id), "-B" });
     configure.addArg(b.pathFromRoot(cache_rel));
     configure.addArg("-DCMAKE_BUILD_TYPE=Release");
-    configure.setEnvironmentVariable(spec.dep_env, spec.dep_path.getPath3(b, null).toString(b.allocator) catch @panic("OOM"));
+    for (spec.deps) |d| {
+        configure.setEnvironmentVariable(d.env, d.path.getPath3(b, null).toString(b.allocator) catch @panic("OOM"));
+    }
 
     const build_cmd = b.addSystemCommand(&.{ "cmake", "--build" });
     build_cmd.addArg(b.pathFromRoot(cache_rel));
