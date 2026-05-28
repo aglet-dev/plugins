@@ -2,24 +2,25 @@
   "manifest": {
     "id": "tokstat",
     "name": "Token Usage Stats",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "runtime": "json-ui-react",
     "plugin": true,
     "namespace": "tokstat",
     "description": {
-      "default": "AI coding token-usage probe. Spawns the `claude` CLI in a PTY, sends `/usage`, strips ANSI and parses the Session + Weekly panels. v0.1: Claude only. Stdio MCP plugin or standalone `--jsonl` CLI.",
-      "zh": "AI 编程 token 用量探针。在 PTY 里跑 `claude /usage`，剥 ANSI 后解析 Session + Weekly 面板。v0.1 只支持 Claude。可作 stdio MCP plugin，也可 `--jsonl` 独立 CLI 跑。",
-      "ja": "AI コーディングのトークン使用量プローブ。PTY 上で `claude` CLI を起動して `/usage` を送り、ANSI を除去して Session + Weekly パネルを解析する。v0.1 は Claude のみ。"
+      "default": "AI coding token-usage probe. Claude: PTY-spawns `claude /usage` per probe. Codex: reads latest ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl, scans tail for the last `token_count` event's rate_limits.primary/secondary used_percent. Stdio MCP plugin or standalone `--jsonl` CLI.",
+      "zh": "AI 编程 token 用量探针。Claude 走 PTY 跑 `claude /usage` 解面板；Codex 直接读 ~/.codex/sessions 下最新 rollout JSONL 末尾 token_count 事件的 rate_limits。可作 stdio MCP plugin 或 `--jsonl` 独立 CLI 跑。",
+      "ja": "AI コーディングのトークン使用量プローブ。Claude は PTY 上で `claude /usage` を実行してパネルを解析、Codex は ~/.codex/sessions 配下の最新 rollout JSONL 末尾の token_count イベントから rate_limits を読む。"
     },
     "license": "MIT",
-    "keywords": ["claude", "usage", "tokens", "session", "weekly"],
+    "keywords": ["claude", "codex", "usage", "tokens", "session", "weekly"],
     "homepage": "https://github.com/agent-rt/aglet-plugins",
     "actions": [
       {
         "name": "snapshot",
         "params": [],
         "result": [
-          { "key": "claude", "type": "object" }
+          { "key": "claude", "type": "object" },
+          { "key": "codex", "type": "object" }
         ],
         "permission": "exec:fork"
       },
@@ -27,7 +28,8 @@
         "name": "refresh",
         "params": [],
         "result": [
-          { "key": "claude", "type": "object" }
+          { "key": "claude", "type": "object" },
+          { "key": "codex", "type": "object" }
         ],
         "permission": "exec:fork"
       }

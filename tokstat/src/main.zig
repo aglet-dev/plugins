@@ -725,6 +725,271 @@ fn extractPanelValues(slice: []const u8) PanelValues {
     return out;
 }
 
+// ── Codex rollout probe ───────────────────────────────────────────────
+//
+// Codex CLI 不像 claude 那样有 `/usage` 面板可以拉。它把每轮对话的
+// rate-limit snapshot 落到 session rollout JSONL：
+//   ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+// 每行是一个事件，含 rate-limit 那种长这样：
+//   {"timestamp":"...","type":"event_msg",
+//    "payload":{"type":"token_count",
+//               "info":{...},
+//               "rate_limits":{"primary":{"used_percent":1.0,
+//                                          "window_minutes":300,
+//                                          "resets_at":<unix_secs>},
+//                              "secondary":{"used_percent":16.0,
+//                                            "window_minutes":10080,
+//                                            "resets_at":<unix_secs>},
+//                              "plan_type":"team",...}}}
+// 策略：找 mtime 最新的 rollout，从末尾向前扫第一条 `"type":"token_count"`
+// 且 rate_limits 非 null 的行。整 file 一般 < 几 MB，read tail 16KB 够覆
+// 盖一两个 token_count 事件。
+//
+// vs claude PTY 路径：codex 这条没子进程开销，纯 fs read，可以高频。
+
+const CodexProbe = struct {
+    ok: bool,
+    err: ?[]const u8,
+    session_pct: ?u32, // primary (5h window)
+    session_resets_ms: ?i64,
+    weekly_pct: ?u32, // secondary (7d window)
+    weekly_resets_ms: ?i64,
+    plan_type: ?[]const u8,
+};
+
+fn probeCodex(arena: std.mem.Allocator) CodexProbe {
+    return probeCodexInner(arena) catch |e| .{
+        .ok = false,
+        .err = @errorName(e),
+        .session_pct = null,
+        .session_resets_ms = null,
+        .weekly_pct = null,
+        .weekly_resets_ms = null,
+        .plan_type = null,
+    };
+}
+
+fn probeCodexInner(arena: std.mem.Allocator) !CodexProbe {
+    const home_cstr = getenv("HOME") orelse return error.NoHome;
+    const home = std.mem.span(home_cstr);
+    const sessions_root = try std.fmt.allocPrint(arena, "{s}/.codex/sessions", .{home});
+
+    const newest = (try findNewestRollout(arena, sessions_root)) orelse return error.NoRollout;
+    const json = try parseLatestTokenCount(arena, newest);
+    return json;
+}
+
+// libc DIR / dirent —— readdir 走它，避免 std.Io.Dir 拉 io 实例。
+// macOS dirent 头部是 ino(8) + seekoff(8) + reclen(2) + namlen(2) + type(1) + name[]。
+// Linux 不同；plugin macOS-first（forkpty 也只在 darwin 链），暂不管 Linux。
+const DIR = opaque {};
+extern "c" fn opendir(name: [*:0]const u8) ?*DIR;
+extern "c" fn readdir(dirp: *DIR) ?*Dirent;
+extern "c" fn closedir(dirp: *DIR) c_int;
+
+const Dirent = extern struct {
+    d_ino: u64,
+    d_seekoff: u64,
+    d_reclen: u16,
+    d_namlen: u16,
+    d_type: u8,
+    d_name: [1024]u8,
+};
+
+// Darwin stat (macOS 10.6+ NEWSTAT layout — _DARWIN_FEATURE_64_BIT_INODE).
+const Stat = extern struct {
+    dev: c_int,
+    mode: u16,
+    nlink: u16,
+    ino: u64,
+    uid: u32,
+    gid: u32,
+    rdev: c_int,
+    atime_sec: c_long,
+    atime_nsec: c_long,
+    mtime_sec: c_long,
+    mtime_nsec: c_long,
+    ctime_sec: c_long,
+    ctime_nsec: c_long,
+    birthtime_sec: c_long,
+    birthtime_nsec: c_long,
+    size: i64,
+    blocks: i64,
+    blksize: i32,
+    flags: u32,
+    gen: u32,
+    lspare: i32,
+    qspare: [2]i64,
+};
+// 注意 macOS x86_64 用 `stat$INODE64` 老 ABI 链接符；arm64 / Apple Silicon
+// 直接 `stat` —— std.c.stat 已经按 native_arch 路由了。我们的 Stat 布局
+// 跟 Darwin BIG_ENDIAN / 64-bit inode 一致；caller 只读 mtime_sec / nsec。
+const statC = @extern(*const fn (path: [*:0]const u8, buf: *Stat) callconv(.c) c_int, .{ .name = "stat" });
+
+const Names = std.ArrayList([]const u8);
+
+/// readdir(path) 把 entry 名字 dup 进 arena 后返回；过滤掉 "." / ".."。
+/// 不传 DT_REG/DT_DIR 过滤 —— caller 自己看名字 + stat 决定。
+fn listDir(arena: std.mem.Allocator, path: []const u8) !Names {
+    var out: Names = .empty;
+    const path_z = try arena.dupeZ(u8, path);
+    const dirp = opendir(path_z.ptr) orelse return out;
+    defer _ = closedir(dirp);
+    while (readdir(dirp)) |ent| {
+        const namlen: usize = ent.d_namlen;
+        if (namlen == 0 or namlen > ent.d_name.len) continue;
+        const name = ent.d_name[0..namlen];
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        const dup = try arena.dupe(u8, name);
+        try out.append(arena, dup);
+    }
+    return out;
+}
+
+/// 走 ~/.codex/sessions/ 树（YYYY/MM/DD/rollout-*.jsonl），按 mtime 选最新。
+/// 树深度固定 3 (year/month/day/file)；普通三层嵌套循环，没必要 walker。
+fn findNewestRollout(arena: std.mem.Allocator, root_path: []const u8) !?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_sec: c_long = std.math.minInt(c_long);
+    var best_nsec: c_long = 0;
+
+    const years = try listDir(arena, root_path);
+    for (years.items) |year| {
+        const year_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ root_path, year });
+        const months = try listDir(arena, year_path);
+        for (months.items) |month| {
+            const month_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ year_path, month });
+            const days = try listDir(arena, month_path);
+            for (days.items) |day| {
+                const day_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ month_path, day });
+                const files = try listDir(arena, day_path);
+                for (files.items) |name| {
+                    if (!std.mem.startsWith(u8, name, "rollout-")) continue;
+                    if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
+                    const file_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ day_path, name });
+                    const file_path_z = try arena.dupeZ(u8, file_path);
+                    var sb: Stat = undefined;
+                    if (statC.*(file_path_z.ptr, &sb) != 0) continue;
+                    if (sb.mtime_sec > best_sec or
+                        (sb.mtime_sec == best_sec and sb.mtime_nsec > best_nsec))
+                    {
+                        best_sec = sb.mtime_sec;
+                        best_nsec = sb.mtime_nsec;
+                        best = file_path;
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
+/// 读 rollout 文件尾 ~64KB，从末尾向前扫第一条 token_count + rate_limits 非 null。
+/// JSON 数值取 primary/secondary used_percent + resets_at + plan_type。
+fn parseLatestTokenCount(arena: std.mem.Allocator, path: []const u8) !CodexProbe {
+    const path_z = try arena.dupeZ(u8, path);
+    const fd = open(path_z.ptr, O_RDONLY);
+    if (fd < 0) return error.OpenFailed;
+    defer _ = close(fd);
+    const sz = lseek(fd, 0, SEEK_END);
+    if (sz <= 0) return error.EmptyFile;
+    const tail_bytes: usize = if (sz < 64 * 1024) @intCast(sz) else 64 * 1024;
+    const offset: i64 = sz - @as(i64, @intCast(tail_bytes));
+    _ = lseek(fd, offset, SEEK_SET);
+    const buf = try arena.alloc(u8, tail_bytes);
+    var got: usize = 0;
+    while (got < buf.len) {
+        const r = read(fd, buf.ptr + got, buf.len - got);
+        if (r <= 0) break;
+        got += @intCast(r);
+    }
+    const data = buf[0..got];
+
+    // 从末尾向前扫，每次找上一个换行。tail 切到行中间的第一截不完整：
+    //   - offset>0：直接跳掉，rollout 早期内容不在 tail 内
+    //   - offset==0：整 tail 是从文件头开始，第一截是合法行 → 也扫
+    var line_end: usize = data.len;
+    // 去掉末尾的 \n
+    while (line_end > 0 and (data[line_end - 1] == '\n' or data[line_end - 1] == '\r'))
+        line_end -= 1;
+    while (line_end > 0) {
+        const nl = std.mem.lastIndexOfScalar(u8, data[0..line_end], '\n');
+        const line_start: usize = if (nl) |p| p + 1 else if (offset == 0) 0 else break;
+        const line = std.mem.trimEnd(u8, data[line_start..line_end], "\r\n");
+        if (line.len > 0) {
+            if (try tryParseRateLimits(arena, line)) |p| return p;
+        }
+        if (nl) |p| line_end = p else break;
+    }
+    return error.NoTokenCount;
+}
+
+fn tryParseRateLimits(arena: std.mem.Allocator, line: []const u8) !?CodexProbe {
+    // 快速过滤：不含 "token_count" 直接跳。
+    if (std.mem.indexOf(u8, line, "\"token_count\"") == null) return null;
+    if (std.mem.indexOf(u8, line, "\"rate_limits\"") == null) return null;
+
+    var parsed = std.json.parseFromSlice(std.json.Value, arena, line, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) { .object => |o| o, else => return null };
+    const payload = switch (root.get("payload") orelse return null) { .object => |o| o, else => return null };
+    const ptype = switch (payload.get("type") orelse return null) { .string => |s| s, else => return null };
+    if (!std.mem.eql(u8, ptype, "token_count")) return null;
+    const rl_v = payload.get("rate_limits") orelse return null;
+    if (rl_v != .object) return null;
+    const rl = rl_v.object;
+
+    var session_pct: ?u32 = null;
+    var session_resets_ms: ?i64 = null;
+    var weekly_pct: ?u32 = null;
+    var weekly_resets_ms: ?i64 = null;
+    var plan_dup: ?[]const u8 = null;
+
+    if (rl.get("primary")) |pv| if (pv == .object) {
+        session_pct = readUsedPct(pv.object);
+        session_resets_ms = readResetsMs(pv.object);
+    };
+    if (rl.get("secondary")) |sv| if (sv == .object) {
+        weekly_pct = readUsedPct(sv.object);
+        weekly_resets_ms = readResetsMs(sv.object);
+    };
+    if (rl.get("plan_type")) |pt| if (pt == .string) {
+        plan_dup = arena.dupe(u8, pt.string) catch null;
+    };
+
+    // 至少要有一边的 used_pct 才算 ok；纯 null 视为没数据。
+    if (session_pct == null and weekly_pct == null) return null;
+
+    return CodexProbe{
+        .ok = true,
+        .err = null,
+        .session_pct = session_pct,
+        .session_resets_ms = session_resets_ms,
+        .weekly_pct = weekly_pct,
+        .weekly_resets_ms = weekly_resets_ms,
+        .plan_type = plan_dup,
+    };
+}
+
+fn readUsedPct(obj: std.json.ObjectMap) ?u32 {
+    const v = obj.get("used_percent") orelse return null;
+    return switch (v) {
+        .integer => |i| @intCast(@max(0, @min(100, i))),
+        .float => |f| @intFromFloat(@round(@max(0.0, @min(100.0, f)))),
+        else => null,
+    };
+}
+
+fn readResetsMs(obj: std.json.ObjectMap) ?i64 {
+    const v = obj.get("resets_at") orelse return null;
+    const secs: i64 = switch (v) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => return null,
+    };
+    return secs * 1000;
+}
+
 // ── JSON serialization ────────────────────────────────────────────────
 
 const Buf = std.ArrayList(u8);
@@ -782,17 +1047,36 @@ fn writeWindowJson(buf: *Buf, alloc: std.mem.Allocator, pct: ?u32, resets: ?[]co
     try buf.append(alloc, '}');
 }
 
-// Builds the full {"ts":..., "claude":{...}} object into an owned slice.
+fn writeCodexJson(buf: *Buf, alloc: std.mem.Allocator, p: CodexProbe) !void {
+    try buf.append(alloc, '{');
+    try buf.print(alloc, "\"ok\":{s}", .{if (p.ok) "true" else "false"});
+    if (p.err) |e| {
+        try buf.appendSlice(alloc, ",\"error\":");
+        try jsonString(buf, alloc, e);
+    }
+    try buf.appendSlice(alloc, ",\"session\":");
+    try writeWindowJson(buf, alloc, p.session_pct, null, p.session_resets_ms);
+    try buf.appendSlice(alloc, ",\"weekly\":");
+    try writeWindowJson(buf, alloc, p.weekly_pct, null, p.weekly_resets_ms);
+    try buf.appendSlice(alloc, ",\"plan_type\":");
+    if (p.plan_type) |s| try jsonString(buf, alloc, s) else try buf.appendSlice(alloc, "null");
+    try buf.append(alloc, '}');
+}
+
+// Builds the full {"ts":..., "claude":{...}, "codex":{...}} object.
 fn buildSample(alloc: std.mem.Allocator) ![]u8 {
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const probe = probeClaude(arena);
+    const claude = probeClaude(arena);
+    const codex = probeCodex(arena);
     var body: Buf = .empty;
     defer body.deinit(arena);
     try body.print(arena, "{{\"ts\":{d},\"claude\":", .{nowMs()});
-    try writeClaudeJson(&body, arena, probe);
+    try writeClaudeJson(&body, arena, claude);
+    try body.appendSlice(arena, ",\"codex\":");
+    try writeCodexJson(&body, arena, codex);
     try body.append(arena, '}');
 
     // Copy into caller's allocator before arena deinits.
