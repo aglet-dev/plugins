@@ -1,0 +1,1048 @@
+//! tokstat — AI coding token-usage probe over MCP stdio.
+//!
+//! v0.1 probes Claude only. Strategy: spawn `claude --allowed-tools ""`
+//! inside a PTY, wait for the welcome screen, send `/usage`, drain the
+//! rendered Usage panel for a few seconds, ESC+Ctrl-C to exit, strip
+//! ANSI, then scan the resulting blob for the Current-session and
+//! Current-week (all models) panels. The host CLI's `/usage` only
+//! renders in a TTY (`-p` mode prints a plain "you have a subscription"
+//! line and bypasses the panel renderer), so PTY is required.
+//!
+//! Dual-mode:
+//!   tokstat              — MCP JSON-RPC over stdio (LSP Content-Length
+//!                          framing). Periodic emitter pushes a
+//!                          `notifications/resources/updated` frame
+//!                          every TOKSTAT_INTERVAL_SECS (default 60s,
+//!                          floor 30s — each probe spawns the whole
+//!                          claude CLI so faster is wasteful).
+//!   tokstat --jsonl      — dump one JSON line per probe tick to stdout
+//!                          and exit on SIGINT. Use --interval=<secs>
+//!                          to override the cadence.
+//!
+//! macOS-first. `forkpty` is in libSystem on Darwin (zero-link); Linux
+//! support needs `-lutil` which the build.zig doesn't link yet — left
+//! as a follow-up.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const posix = std.posix;
+
+// ── libc bindings ──────────────────────────────────────────────────────
+
+const stdin_fd: posix.fd_t = 0;
+const stdout_fd: posix.fd_t = 1;
+const stderr_fd: posix.fd_t = 2;
+
+extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn forkpty(amaster: *c_int, name: ?[*]u8, termp: ?*anyopaque, winp: ?*Winsize) c_int;
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
+extern "c" fn kill(pid: c_int, sig: c_int) c_int;
+const fcntl = std.c.fcntl;
+extern "c" fn time(t: ?*c_long) c_long;
+const Timeval = extern struct { tv_sec: c_long, tv_usec: c_int };
+extern "c" fn gettimeofday(tv: *Timeval, tz: ?*anyopaque) c_int;
+fn nowMs() i64 {
+    var tv: Timeval = .{ .tv_sec = 0, .tv_usec = 0 };
+    _ = gettimeofday(&tv, null);
+    return @as(i64, tv.tv_sec) * 1000 + @divTrunc(@as(i64, tv.tv_usec), 1000);
+}
+extern "c" fn _exit(status: c_int) noreturn;
+extern "c" fn chdir(path: [*:0]const u8) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+// Time conversion (Darwin / BSD tm shape — Linux struct is wider with
+// tm_gmtoff + tm_zone too; we read fields by name so layout drift is OK
+// as long as the leading nine ints match libc's struct tm).
+const Tm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: ?[*:0]const u8,
+};
+extern "c" fn localtime_r(t: *const c_long, tm: *Tm) ?*Tm;
+extern "c" fn mktime(tm: *Tm) c_long;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn lseek(fd: c_int, off: c_long, whence: c_int) c_long;
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+const O_RDONLY: c_int = 0;
+const SEEK_END: c_int = 2;
+const SEEK_SET: c_int = 0;
+const F_OK: c_int = 0;
+
+const F_GETFL: c_int = 3;
+const F_SETFL: c_int = 4;
+const O_NONBLOCK: c_int = 0x0004; // darwin
+const WNOHANG: c_int = 1;
+const SIGINT: c_int = 2;
+const SIGKILL: c_int = 9;
+
+const Winsize = extern struct {
+    ws_row: c_ushort,
+    ws_col: c_ushort,
+    ws_xpixel: c_ushort,
+    ws_ypixel: c_ushort,
+};
+
+// ── pthread for stdout mutex + emitter thread (same shape as sysmon) ─
+
+const pthread_t = std.c.pthread_t;
+const pthread_mutex_t = std.c.pthread_mutex_t;
+extern "c" fn pthread_create(thread: *pthread_t, attr: ?*anyopaque, start_routine: *const fn (?*anyopaque) callconv(.c) ?*anyopaque, arg: ?*anyopaque) c_int;
+extern "c" fn pthread_detach(thread: pthread_t) c_int;
+extern "c" fn pthread_mutex_lock(m: *pthread_mutex_t) c_int;
+extern "c" fn pthread_mutex_unlock(m: *pthread_mutex_t) c_int;
+
+var stdout_mu: pthread_mutex_t = .{};
+var cache_mu: pthread_mutex_t = .{};
+var emitter_started: bool = false;
+
+// Cached last probe result, JSON-encoded so emit + tools/call share one
+// path. `null` until the first probe finishes.
+var cached_json: ?[]u8 = null;
+var cached_ts: i64 = 0;
+const cache_alloc = std.heap.smp_allocator;
+
+// Configurable via env (plugin mode) or CLI flag (--jsonl mode).
+var interval_secs: u32 = 60;
+const interval_secs_floor: u32 = 30;
+
+fn libcWrite(fd: posix.fd_t, buf: []const u8) !usize {
+    const n = write(fd, buf.ptr, buf.len);
+    if (n < 0) return error.WriteFailed;
+    return @intCast(n);
+}
+
+fn ptyWrite(fd: c_int, buf: []const u8) void {
+    _ = write(fd, buf.ptr, buf.len);
+}
+
+fn ptyRead(fd: c_int, buf: []u8) isize {
+    return read(fd, buf.ptr, buf.len);
+}
+
+// ── LSP-style framing (identical to sysmon) ───────────────────────────
+
+fn readAll(buf: []u8) !void {
+    var got: usize = 0;
+    while (got < buf.len) {
+        const n = try posix.read(stdin_fd, buf[got..]);
+        if (n == 0) return error.EndOfStream;
+        got += n;
+    }
+}
+
+fn writeAllStdout(buf: []const u8) !void {
+    var sent: usize = 0;
+    while (sent < buf.len) {
+        const n = try libcWrite(stdout_fd, buf[sent..]);
+        if (n == 0) return error.WriteFailed;
+        sent += n;
+    }
+}
+
+fn readFramed(alloc: std.mem.Allocator) ![]u8 {
+    var header: [512]u8 = undefined;
+    var hlen: usize = 0;
+    while (true) {
+        if (hlen >= header.len) return error.HeaderTooBig;
+        try readAll(header[hlen..][0..1]);
+        hlen += 1;
+        if (hlen >= 4 and std.mem.eql(u8, header[hlen - 4 .. hlen], "\r\n\r\n")) break;
+    }
+    var length: ?usize = null;
+    var it = std.mem.splitSequence(u8, header[0 .. hlen - 4], "\r\n");
+    while (it.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const k = std.mem.trim(u8, line[0..colon], " \t");
+        const v = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(k, "Content-Length")) {
+            length = std.fmt.parseInt(usize, v, 10) catch return error.BadHeader;
+        }
+    }
+    const n = length orelse return error.MissingContentLength;
+    const body = try alloc.alloc(u8, n);
+    errdefer alloc.free(body);
+    try readAll(body);
+    return body;
+}
+
+fn writeFramed(body: []const u8) !void {
+    var hdr: [64]u8 = undefined;
+    const h = try std.fmt.bufPrint(&hdr, "Content-Length: {d}\r\n\r\n", .{body.len});
+    _ = pthread_mutex_lock(&stdout_mu);
+    defer _ = pthread_mutex_unlock(&stdout_mu);
+    try writeAllStdout(h);
+    try writeAllStdout(body);
+}
+
+// ── PTY probe of `claude /usage` ──────────────────────────────────────
+
+const Probe = struct {
+    ok: bool,
+    err: ?[]const u8,
+    session_pct: ?u32,
+    session_resets: ?[]const u8,
+    session_resets_ms: ?i64,
+    weekly_pct: ?u32,
+    weekly_resets: ?[]const u8,
+    weekly_resets_ms: ?i64,
+    total_cost_usd: ?f64,
+    raw_panel: ?[]const u8, // best-effort excerpt for debugging
+};
+
+fn probeClaude(arena: std.mem.Allocator) Probe {
+    return probeClaudeInner(arena) catch |e| .{
+        .ok = false,
+        .err = @errorName(e),
+        .session_pct = null,
+        .session_resets = null,
+        .session_resets_ms = null,
+        .weekly_pct = null,
+        .weekly_resets = null,
+        .weekly_resets_ms = null,
+        .total_cost_usd = null,
+        .raw_panel = null,
+    };
+}
+
+fn findTrustedDir(arena: std.mem.Allocator) ?[:0]const u8 {
+    const home_cstr = getenv("HOME") orelse return null;
+    const home = std.mem.span(home_cstr);
+    const path = std.fmt.allocPrintSentinel(arena, "{s}/.claude.json", .{home}, 0) catch return null;
+    const fd = open(path.ptr, O_RDONLY);
+    if (fd < 0) return null;
+    defer _ = close(fd);
+    const sz = lseek(fd, 0, SEEK_END);
+    if (sz <= 0 or sz > 64 * 1024 * 1024) return null;
+    _ = lseek(fd, 0, SEEK_SET);
+    const data = arena.alloc(u8, @intCast(sz)) catch return null;
+    var got: usize = 0;
+    while (got < data.len) {
+        const r = read(fd, data.ptr + got, data.len - got);
+        if (r <= 0) break;
+        got += @intCast(r);
+    }
+    if (got == 0) return null;
+
+    // Walk the projects map forward: `"projects": { "<absPath>": { ... }, ... }`.
+    // We don't need a full JSON parser — match the top-level keys that
+    // start with a slash (absolute path) and look ahead within their
+    // object for `"hasTrustDialogAccepted": true`.
+    const projects_anchor = std.mem.indexOf(u8, data[0..got], "\"projects\"") orelse return null;
+    const obj_start = std.mem.indexOfScalarPos(u8, data[0..got], projects_anchor, '{') orelse return null;
+    var i: usize = obj_start + 1;
+    var depth: i32 = 1;
+    while (i < got and depth > 0) {
+        const c = data[i];
+        if (c == '"' and depth == 1) {
+            // Top-level key in projects map. Scan to closing quote.
+            const ks = i + 1;
+            var ke = ks;
+            while (ke < got and data[ke] != '"') : (ke += 1) {
+                if (data[ke] == '\\') ke += 1;
+            }
+            if (ke >= got) return null;
+            const key = data[ks..ke];
+            i = ke + 1;
+            // Find this entry's object body.
+            const obj_open = std.mem.indexOfScalarPos(u8, data[0..got], i, '{') orelse return null;
+            // Match braces to find object close.
+            var j: usize = obj_open + 1;
+            var d2: i32 = 1;
+            while (j < got and d2 > 0) : (j += 1) {
+                const cc = data[j];
+                if (cc == '"') {
+                    j += 1;
+                    while (j < got and data[j] != '"') : (j += 1) {
+                        if (data[j] == '\\') j += 1;
+                    }
+                } else if (cc == '{') {
+                    d2 += 1;
+                } else if (cc == '}') {
+                    d2 -= 1;
+                }
+            }
+            const obj_end = j;
+            const body = data[obj_open..obj_end];
+            if (key.len > 0 and key[0] == '/' and
+                std.mem.indexOf(u8, body, "\"hasTrustDialogAccepted\": true") != null)
+            {
+                const z = arena.dupeZ(u8, key) catch return null;
+                if (access(z.ptr, F_OK) == 0) return z;
+            }
+            i = obj_end;
+            continue;
+        }
+        if (c == '{') depth += 1;
+        if (c == '}') depth -= 1;
+        i += 1;
+    }
+    return null;
+}
+
+fn probeClaudeInner(arena: std.mem.Allocator) !Probe {
+    // Pick a trusted folder so we never deadlock on the safety dialog.
+    const trusted = findTrustedDir(arena);
+
+    var master_fd: c_int = -1;
+    var ws: Winsize = .{ .ws_row = 40, .ws_col = 110, .ws_xpixel = 0, .ws_ypixel = 0 };
+    const pid = forkpty(&master_fd, null, null, &ws);
+    if (pid < 0) return error.ForkptyFailed;
+
+    if (pid == 0) {
+        if (trusted) |dir| {
+            _ = chdir(dir.ptr);
+        } else if (getenv("HOME")) |home| _ = chdir(home);
+        // Force a known TERM so claude's TUI uses xterm-compatible
+        // sequences and doesn't lock waiting on exotic queries.
+        _ = setenv("TERM", "xterm-256color", 1);
+        var argv = [_:null]?[*:0]const u8{ "claude", "--allowed-tools", "" };
+        _ = execvp("claude", &argv);
+        _exit(127);
+    }
+
+    defer {
+        // Best-effort teardown. SIGKILL the child, reap with bounded
+        // WNOHANG polling (waitpid(...,0) would block forever if SIGKILL
+        // somehow didn't land), then close master.
+        _ = kill(pid, SIGKILL);
+        var status: c_int = 0;
+        var tries: u32 = 0;
+        while (tries < 50) : (tries += 1) {
+            const r = waitpid(pid, &status, WNOHANG);
+            if (r == pid or r < 0) break;
+            _ = usleep(20_000);
+        }
+        _ = close(master_fd);
+    }
+
+    // Non-blocking master so the read loop can poll with sleeps.
+    const flags = fcntl(master_fd, F_GETFL, @as(c_int, 0));
+    _ = fcntl(master_fd, F_SETFL, @as(c_int, flags | O_NONBLOCK));
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(arena);
+
+    const deadline_ms: i64 = nowMs() + 30_000;
+    var usage_sent = false;
+    var trust_acked = false;
+    var quiet_after_usage_ms: i64 = 0;
+    var first_byte_ms: ?i64 = null;
+    var panel_first_seen_ms: ?i64 = null;
+
+    while (nowMs() < deadline_ms) {
+        var chunk: [4096]u8 = undefined;
+        const rc = ptyRead(master_fd, &chunk);
+        const n: usize = if (rc > 0) @intCast(rc) else 0;
+        if (rc < 0) {
+            // Likely EAGAIN under O_NONBLOCK; treat as quiet tick.
+            _ = usleep(50_000);
+            if (usage_sent) quiet_after_usage_ms += 50;
+            if (usage_sent and quiet_after_usage_ms > 1500) break;
+            continue;
+        }
+        if (n == 0) {
+            _ = usleep(50_000);
+            if (usage_sent) quiet_after_usage_ms += 50;
+            if (usage_sent and quiet_after_usage_ms > 1500) break;
+            continue;
+        }
+        try buf.appendSlice(arena, chunk[0..n]);
+        if (first_byte_ms == null) first_byte_ms = nowMs();
+        if (usage_sent) quiet_after_usage_ms = 0;
+
+        // Auto-respond to Primary DA query (claude emits ESC[c on startup
+        // and on dialog transitions, waiting for the terminal's reply
+        // before reading further keystrokes — a real xterm answers
+        // `ESC[?1;2c`, the kernel PTY does not, so we forge it here).
+        if (std.mem.indexOf(u8, buf.items, "\x1b[c") != null) {
+            ptyWrite(master_fd, "\x1b[?1;2c");
+        }
+        if (!trust_acked) {
+            if (std.mem.indexOf(u8, buf.items, "trust this folder") != null or
+                std.mem.indexOf(u8, buf.items, "Quick safety check") != null)
+            {
+                _ = usleep(150_000);
+                ptyWrite(master_fd, "\r");
+                trust_acked = true;
+                first_byte_ms = nowMs();
+            }
+        }
+        if (!usage_sent) {
+            const seen_banner = std.mem.indexOf(u8, buf.items, "Welcome back") != null or
+                std.mem.indexOf(u8, buf.items, "Welcome to Claude") != null or
+                std.mem.indexOf(u8, buf.items, "Try \"") != null;
+            const since_first = nowMs() - (first_byte_ms orelse nowMs());
+            if (seen_banner and since_first > 600) {
+                ptyWrite(master_fd, "/usage\r");
+                usage_sent = true;
+            } else if (since_first > 12000 and buf.items.len > 0) {
+                ptyWrite(master_fd, "/usage\r");
+                usage_sent = true;
+            }
+        }
+        // Stop early once the panel has rendered and settled briefly.
+        if (usage_sent) {
+            if (panel_first_seen_ms == null and
+                (std.mem.indexOf(u8, buf.items, "Current session") != null or
+                    std.mem.indexOf(u8, buf.items, "Current week") != null))
+            {
+                panel_first_seen_ms = nowMs();
+            }
+            if (panel_first_seen_ms) |t| if (nowMs() - t > 800) break;
+        }
+    }
+
+    // Try to exit cleanly so the subprocess doesn't linger in the
+    // background filling its tty buffer.
+    ptyWrite(master_fd, "\x1b"); // close popover
+    _ = usleep(80_000);
+    ptyWrite(master_fd, "\x03"); // Ctrl-C
+    _ = usleep(80_000);
+    ptyWrite(master_fd, "\x03");
+
+    if (!usage_sent) return error.UsagePromptNeverReady;
+    if (buf.items.len == 0) return error.NoOutput;
+
+    const stripped = try stripAnsi(arena, buf.items);
+    if (getenv("TOKSTAT_DEBUG_DUMP")) |_| {
+        _ = libcWrite(stderr_fd, "--- STRIPPED START ---\n") catch {};
+        _ = libcWrite(stderr_fd, stripped) catch {};
+        _ = libcWrite(stderr_fd, "\n--- STRIPPED END ---\n") catch {};
+    }
+    return parsePanel(arena, stripped);
+}
+
+// ── ANSI / control-sequence stripping ─────────────────────────────────
+
+fn stripAnsi(arena: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < raw.len) {
+        const c = raw[i];
+        if (c == 0x1b) {
+            if (i + 1 >= raw.len) {
+                i += 1;
+                continue;
+            }
+            const nxt = raw[i + 1];
+            switch (nxt) {
+                '[' => {
+                    // CSI: ESC [ <param>* <intermediate>* <final 0x40-0x7e>
+                    i += 2;
+                    while (i < raw.len) : (i += 1) {
+                        const cc = raw[i];
+                        if (cc >= 0x40 and cc <= 0x7e) {
+                            i += 1;
+                            break;
+                        }
+                    }
+                },
+                ']' => {
+                    // OSC: terminated by BEL or ST
+                    i += 2;
+                    while (i < raw.len) : (i += 1) {
+                        if (raw[i] == 0x07) {
+                            i += 1;
+                            break;
+                        }
+                        if (raw[i] == 0x1b and i + 1 < raw.len and raw[i + 1] == '\\') {
+                            i += 2;
+                            break;
+                        }
+                    }
+                },
+                'P', '^', '_' => {
+                    // DCS / PM / APC — terminated by ST
+                    i += 2;
+                    while (i < raw.len) : (i += 1) {
+                        if (raw[i] == 0x1b and i + 1 < raw.len and raw[i + 1] == '\\') {
+                            i += 2;
+                            break;
+                        }
+                    }
+                },
+                '(', ')', '*', '+' => {
+                    // Charset designation, 1 byte follows
+                    i += 3;
+                },
+                else => {
+                    // 2-byte escape (NEL, IND, etc.)
+                    i += 2;
+                },
+            }
+            continue;
+        }
+        // Drop CR; keep LF. Many TUIs emit lone CR for cursor reset.
+        if (c == '\r') {
+            i += 1;
+            continue;
+        }
+        try out.append(arena, c);
+        i += 1;
+    }
+    return out.toOwnedSlice(arena);
+}
+
+// ── Panel parsing ─────────────────────────────────────────────────────
+//
+// After ANSI strip the buffer is a mostly-spaceful blob with occasional
+// LFs (claude positions text with cursor moves, not \n). Useful tokens:
+//
+//   "Current session"            ... "<N>% used" ... "Resets <human> (TZ)"
+//   "Current week (all models)"  ... "<N>% used" ... "Resets <human> (TZ)"
+//   "Total cost:" then "$<float>"
+//
+// We slice between landmarks to keep "Current session"'s scan from
+// straying into the week panel.
+
+fn parsePanel(arena: std.mem.Allocator, stripped: []u8) !Probe {
+    var p: Probe = .{
+        .ok = false,
+        .err = null,
+        .session_pct = null,
+        .session_resets = null,
+        .session_resets_ms = null,
+        .weekly_pct = null,
+        .weekly_resets = null,
+        .weekly_resets_ms = null,
+        .total_cost_usd = null,
+        .raw_panel = null,
+    };
+
+    // Anchor the search after the menu header so an earlier word
+    // "Session" in some banner doesn't trip us. Tolerate missing anchor.
+    var search_blob = stripped;
+    if (std.mem.indexOf(u8, stripped, "Usage")) |u_idx| {
+        search_blob = stripped[u_idx..];
+    }
+
+    const session_end = std.mem.indexOf(u8, search_blob, "Current week") orelse search_blob.len;
+    if (std.mem.indexOf(u8, search_blob, "Current session")) |s_idx| {
+        const slice = search_blob[s_idx..session_end];
+        const v = extractPanelValues(slice);
+        p.session_pct = v.pct;
+        if (v.resets) |r| {
+            p.session_resets = try arena.dupe(u8, r);
+            p.session_resets_ms = parseResetEpochMs(r);
+        }
+    }
+
+    // Prefer the "(all models)" panel; fall back to bare "Current week".
+    var weekly_slice_opt: ?[]const u8 = null;
+    if (std.mem.indexOf(u8, search_blob, "Current week (all models)")) |w_idx| {
+        var end = search_blob.len;
+        if (std.mem.indexOfPos(u8, search_blob, w_idx + 25, "Current week (")) |w2| end = w2;
+        weekly_slice_opt = search_blob[w_idx..end];
+    } else if (std.mem.indexOf(u8, search_blob, "Current week")) |w_idx| {
+        weekly_slice_opt = search_blob[w_idx..];
+    }
+    if (weekly_slice_opt) |slice| {
+        const v = extractPanelValues(slice);
+        p.weekly_pct = v.pct;
+        if (v.resets) |r| {
+            p.weekly_resets = try arena.dupe(u8, r);
+            p.weekly_resets_ms = parseResetEpochMs(r);
+        }
+    }
+
+    // Total cost — scan for "Total cost:" then a "$" then a float.
+    if (std.mem.indexOf(u8, stripped, "Total cost:")) |c_idx| {
+        const tail = stripped[c_idx..@min(c_idx + 200, stripped.len)];
+        if (std.mem.indexOfScalar(u8, tail, '$')) |d_idx| {
+            const num_start = d_idx + 1;
+            var num_end = num_start;
+            while (num_end < tail.len) : (num_end += 1) {
+                const ch = tail[num_end];
+                if (!((ch >= '0' and ch <= '9') or ch == '.')) break;
+            }
+            if (num_end > num_start) {
+                p.total_cost_usd = std.fmt.parseFloat(f64, tail[num_start..num_end]) catch null;
+            }
+        }
+    }
+
+    p.ok = p.session_pct != null or p.weekly_pct != null;
+    if (!p.ok) p.err = "panel-not-recognized";
+    return p;
+}
+
+// Convert claude's human reset string (`5:40pm (Asia/Tokyo)` or
+// `Jun 1 at 1pm (Asia/Tokyo)`) to absolute epoch ms. The TZ in parens is
+// claude's display TZ which on a normal install matches the system TZ —
+// we just resolve via libc mktime (local time). If only a time is given
+// and that time already passed today, bump to tomorrow.
+fn parseResetEpochMs(raw: []const u8) ?i64 {
+    var s = raw;
+    if (std.mem.indexOfScalar(u8, s, '(')) |op| {
+        var e = op;
+        while (e > 0 and s[e - 1] == ' ') : (e -= 1) {}
+        s = s[0..e];
+    }
+    s = std.mem.trim(u8, s, " \t");
+    if (s.len == 0) return null;
+
+    var now_tt: c_long = 0;
+    _ = time(&now_tt);
+    var tm: Tm = std.mem.zeroes(Tm);
+    if (localtime_r(&now_tt, &tm) == null) return null;
+
+    var has_date = false;
+    var i: usize = 0;
+    const months = [_][]const u8{ "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+    if (s.len >= 3) {
+        var lower3: [3]u8 = undefined;
+        for (0..3) |k| lower3[k] = std.ascii.toLower(s[k]);
+        for (months, 0..) |m, idx| {
+            if (std.mem.eql(u8, &lower3, m)) {
+                tm.tm_mon = @intCast(idx);
+                has_date = true;
+                i = 3;
+                while (i < s.len and std.ascii.isAlphabetic(s[i])) : (i += 1) {}
+                while (i < s.len and s[i] == ' ') : (i += 1) {}
+                var d_end = i;
+                while (d_end < s.len and std.ascii.isDigit(s[d_end])) : (d_end += 1) {}
+                if (d_end > i) {
+                    tm.tm_mday = std.fmt.parseInt(c_int, s[i..d_end], 10) catch tm.tm_mday;
+                    i = d_end;
+                }
+                break;
+            }
+        }
+    }
+    while (i < s.len and s[i] == ' ') : (i += 1) {}
+    if (i + 3 <= s.len and std.ascii.eqlIgnoreCase(s[i .. i + 3], "at ")) i += 3;
+    while (i < s.len and s[i] == ' ') : (i += 1) {}
+
+    var h: c_int = 0;
+    var m: c_int = 0;
+    var h_end = i;
+    while (h_end < s.len and std.ascii.isDigit(s[h_end])) : (h_end += 1) {}
+    if (h_end == i) return null;
+    h = std.fmt.parseInt(c_int, s[i..h_end], 10) catch return null;
+    i = h_end;
+    if (i < s.len and s[i] == ':') {
+        i += 1;
+        var m_end = i;
+        while (m_end < s.len and std.ascii.isDigit(s[m_end])) : (m_end += 1) {}
+        m = std.fmt.parseInt(c_int, s[i..m_end], 10) catch 0;
+        i = m_end;
+    }
+    while (i < s.len and s[i] == ' ') : (i += 1) {}
+    if (i + 1 < s.len) {
+        const a = std.ascii.toLower(s[i]);
+        const b = std.ascii.toLower(s[i + 1]);
+        if (a == 'p' and b == 'm' and h < 12) h += 12;
+        if (a == 'a' and b == 'm' and h == 12) h = 0;
+    }
+
+    tm.tm_hour = h;
+    tm.tm_min = m;
+    tm.tm_sec = 0;
+    tm.tm_isdst = -1; // let mktime resolve DST
+
+    var tt = mktime(&tm);
+    if (tt < 0) return null;
+
+    if (!has_date) {
+        // Time-only: claude shows the next reset (≤5h away). If our
+        // computed point already passed, push to tomorrow.
+        if (tt <= now_tt) {
+            tm.tm_mday += 1;
+            tm.tm_isdst = -1;
+            tt = mktime(&tm);
+        }
+    } else if (tt + 86400 < now_tt) {
+        // Date present but before today (Dec→Jan rollover): bump year.
+        tm.tm_year += 1;
+        tm.tm_isdst = -1;
+        tt = mktime(&tm);
+    }
+    if (tt < 0) return null;
+    return @as(i64, tt) * 1000;
+}
+
+const PanelValues = struct { pct: ?u32, resets: ?[]const u8 };
+
+fn extractPanelValues(slice: []const u8) PanelValues {
+    var out: PanelValues = .{ .pct = null, .resets = null };
+
+    if (std.mem.indexOf(u8, slice, "%used")) |p_idx| {
+        // Walk backwards over digits (skipping leading spaces).
+        var digits: [4]u8 = undefined;
+        var dn: usize = 0;
+        var j: isize = @as(isize, @intCast(p_idx)) - 1;
+        // Skip optional spaces right before '%'.
+        while (j >= 0 and slice[@intCast(j)] == ' ') : (j -= 1) {}
+        while (j >= 0 and dn < digits.len) : (j -= 1) {
+            const ch = slice[@intCast(j)];
+            if (ch >= '0' and ch <= '9') {
+                digits[dn] = ch;
+                dn += 1;
+            } else break;
+        }
+        if (dn > 0) {
+            var rev: [4]u8 = undefined;
+            for (0..dn) |k| rev[k] = digits[dn - 1 - k];
+            out.pct = std.fmt.parseInt(u32, rev[0..dn], 10) catch null;
+        }
+    }
+
+    if (std.mem.indexOf(u8, slice, "Resets ")) |r_idx| {
+        const rstart = r_idx + "Resets ".len;
+        var rend = @min(rstart + 80, slice.len);
+        // Stop at next major landmark.
+        const stops = [_][]const u8{ "Current ", "What's", "\n\n", "Approximate" };
+        for (stops) |stop| {
+            if (std.mem.indexOfPos(u8, slice, rstart, stop)) |sp| {
+                if (sp < rend) rend = sp;
+            }
+        }
+        // Prefer to keep the closing ')' if a paren block is in range.
+        if (std.mem.indexOfScalarPos(u8, slice, rstart, '(')) |op| {
+            if (op < rend) {
+                if (std.mem.indexOfScalarPos(u8, slice, op, ')')) |cp| {
+                    if (cp + 1 <= rend) rend = cp + 1;
+                }
+            }
+        }
+        const trimmed = std.mem.trim(u8, slice[rstart..rend], " \t\n");
+        if (trimmed.len > 0) out.resets = trimmed;
+    }
+
+    return out;
+}
+
+// ── JSON serialization ────────────────────────────────────────────────
+
+const Buf = std.ArrayList(u8);
+
+fn jsonString(buf: *Buf, alloc: std.mem.Allocator, s: []const u8) !void {
+    try buf.append(alloc, '"');
+    for (s) |c| switch (c) {
+        '"' => try buf.appendSlice(alloc, "\\\""),
+        '\\' => try buf.appendSlice(alloc, "\\\\"),
+        '\n' => try buf.appendSlice(alloc, "\\n"),
+        '\r' => try buf.appendSlice(alloc, "\\r"),
+        '\t' => try buf.appendSlice(alloc, "\\t"),
+        else => if (c < 0x20) {
+            var esc: [7]u8 = undefined;
+            const w = try std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{c});
+            try buf.appendSlice(alloc, w);
+        } else try buf.append(alloc, c),
+    };
+    try buf.append(alloc, '"');
+}
+
+fn writeClaudeJson(buf: *Buf, alloc: std.mem.Allocator, p: Probe) !void {
+    try buf.append(alloc, '{');
+    try buf.print(alloc, "\"ok\":{s}", .{if (p.ok) "true" else "false"});
+    if (p.err) |e| {
+        try buf.appendSlice(alloc, ",\"error\":");
+        try jsonString(buf, alloc, e);
+    }
+    try buf.appendSlice(alloc, ",\"session\":");
+    try writeWindowJson(buf, alloc, p.session_pct, p.session_resets, p.session_resets_ms);
+    try buf.appendSlice(alloc, ",\"weekly\":");
+    try writeWindowJson(buf, alloc, p.weekly_pct, p.weekly_resets, p.weekly_resets_ms);
+    if (p.total_cost_usd) |c| {
+        try buf.print(alloc, ",\"total_cost_usd\":{d:.4}", .{c});
+    } else {
+        try buf.appendSlice(alloc, ",\"total_cost_usd\":null");
+    }
+    try buf.append(alloc, '}');
+}
+
+fn writeWindowJson(buf: *Buf, alloc: std.mem.Allocator, pct: ?u32, resets: ?[]const u8, resets_ms: ?i64) !void {
+    try buf.append(alloc, '{');
+    if (pct) |v| {
+        try buf.print(alloc, "\"used_pct\":{d}", .{v});
+    } else {
+        try buf.appendSlice(alloc, "\"used_pct\":null");
+    }
+    try buf.appendSlice(alloc, ",\"resets_at_raw\":");
+    if (resets) |r| try jsonString(buf, alloc, r) else try buf.appendSlice(alloc, "null");
+    if (resets_ms) |ms| {
+        try buf.print(alloc, ",\"resets_at_ms\":{d}", .{ms});
+    } else {
+        try buf.appendSlice(alloc, ",\"resets_at_ms\":null");
+    }
+    try buf.append(alloc, '}');
+}
+
+// Builds the full {"ts":..., "claude":{...}} object into an owned slice.
+fn buildSample(alloc: std.mem.Allocator) ![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const probe = probeClaude(arena);
+    var body: Buf = .empty;
+    defer body.deinit(arena);
+    try body.print(arena, "{{\"ts\":{d},\"claude\":", .{nowMs()});
+    try writeClaudeJson(&body, arena, probe);
+    try body.append(arena, '}');
+
+    // Copy into caller's allocator before arena deinits.
+    return alloc.dupe(u8, body.items);
+}
+
+// ── Cache helpers ─────────────────────────────────────────────────────
+
+fn cacheStore(json: []const u8) void {
+    _ = pthread_mutex_lock(&cache_mu);
+    defer _ = pthread_mutex_unlock(&cache_mu);
+    if (cached_json) |old| cache_alloc.free(old);
+    cached_json = cache_alloc.dupe(u8, json) catch null;
+    cached_ts = nowMs();
+}
+
+fn cacheGetDup(alloc: std.mem.Allocator) ?[]u8 {
+    _ = pthread_mutex_lock(&cache_mu);
+    defer _ = pthread_mutex_unlock(&cache_mu);
+    const cur = cached_json orelse return null;
+    return alloc.dupe(u8, cur) catch null;
+}
+
+// ── Emitter (plugin mode) ─────────────────────────────────────────────
+
+fn emitterLoop(_: ?*anyopaque) callconv(.c) ?*anyopaque {
+    while (true) {
+        const json = buildSample(cache_alloc) catch {
+            _ = usleep(interval_secs * 1_000_000);
+            continue;
+        };
+        defer cache_alloc.free(json);
+        cacheStore(json);
+
+        var arena_state = std.heap.ArenaAllocator.init(cache_alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var body: Buf = .empty;
+        defer body.deinit(arena);
+        body.appendSlice(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"sample\",\"contents\":") catch {
+            _ = usleep(interval_secs * 1_000_000);
+            continue;
+        };
+        body.appendSlice(arena, json) catch {
+            _ = usleep(interval_secs * 1_000_000);
+            continue;
+        };
+        body.appendSlice(arena, "}}") catch {
+            _ = usleep(interval_secs * 1_000_000);
+            continue;
+        };
+        writeFramed(body.items) catch break;
+
+        _ = usleep(interval_secs * 1_000_000);
+    }
+    return null;
+}
+
+fn startEmitter() void {
+    if (emitter_started) return;
+    var tid: pthread_t = undefined;
+    if (pthread_create(&tid, null, emitterLoop, null) != 0) return;
+    _ = pthread_detach(tid);
+    emitter_started = true;
+}
+
+// ── MCP message handling ──────────────────────────────────────────────
+
+fn extractStringField(json: []const u8, key: []const u8) ?[]const u8 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{key}) catch return null;
+    var i: usize = std.mem.indexOf(u8, json, needle) orelse return null;
+    i += needle.len;
+    while (i < json.len and (json[i] == ' ' or json[i] == ':' or json[i] == '\t')) : (i += 1) {}
+    if (i >= json.len or json[i] != '"') return null;
+    i += 1;
+    const start = i;
+    while (i < json.len and json[i] != '"') : (i += 1) {}
+    if (i >= json.len) return null;
+    return json[start..i];
+}
+
+fn extractIdRaw(json: []const u8) []const u8 {
+    var i: usize = std.mem.indexOf(u8, json, "\"id\"") orelse return "null";
+    i += 4;
+    while (i < json.len and (json[i] == ' ' or json[i] == ':' or json[i] == '\t')) : (i += 1) {}
+    if (i >= json.len) return "null";
+    const start = i;
+    if (json[i] == '"') {
+        i += 1;
+        while (i < json.len and json[i] != '"') : (i += 1) {}
+        if (i >= json.len) return "null";
+        return json[start .. i + 1];
+    }
+    while (i < json.len and json[i] != ',' and json[i] != '}' and json[i] != ' ') : (i += 1) {}
+    return json[start..i];
+}
+
+fn writeError(arena: std.mem.Allocator, id: []const u8, code: i32, msg: []const u8) !void {
+    var resp: Buf = .empty;
+    defer resp.deinit(arena);
+    try resp.print(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":{d},\"message\":", .{ id, code });
+    try jsonString(&resp, arena, msg);
+    try resp.appendSlice(arena, "}}");
+    try writeFramed(resp.items);
+}
+
+fn handleMessage(arena: std.mem.Allocator, msg: []const u8) !void {
+    const method = extractStringField(msg, "method") orelse return;
+    const id = extractIdRaw(msg);
+
+    if (std.mem.eql(u8, method, "initialize")) {
+        var resp: Buf = .empty;
+        defer resp.deinit(arena);
+        try resp.print(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{\"tools\":{{\"listChanged\":false}}}},\"serverInfo\":{{\"name\":\"tokstat\",\"version\":\"0.1.0\"}}}}}}", .{id});
+        try writeFramed(resp.items);
+        // Kick off the background probe immediately so the first
+        // snapshot tools/call doesn't block for 20s synchronously.
+        startEmitter();
+        return;
+    }
+    if (std.mem.eql(u8, method, "notifications/initialized")) return;
+    if (std.mem.eql(u8, method, "resources/subscribe")) {
+        startEmitter();
+        var resp: Buf = .empty;
+        defer resp.deinit(arena);
+        try resp.print(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{}}}}", .{id});
+        try writeFramed(resp.items);
+        return;
+    }
+    if (std.mem.eql(u8, method, "resources/unsubscribe")) {
+        var resp: Buf = .empty;
+        defer resp.deinit(arena);
+        try resp.print(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{}}}}", .{id});
+        try writeFramed(resp.items);
+        return;
+    }
+    if (std.mem.eql(u8, method, "tools/call")) {
+        const tool = extractStringField(msg, "name") orelse {
+            try writeError(arena, id, -32602, "missing tool name");
+            return;
+        };
+        const inner: []u8 = blk: {
+            if (std.mem.eql(u8, tool, "tokstat.snapshot")) {
+                if (cacheGetDup(arena)) |c| break :blk c;
+                // No cached value yet — fall through to a fresh probe.
+            }
+            if (std.mem.eql(u8, tool, "tokstat.snapshot") or
+                std.mem.eql(u8, tool, "tokstat.refresh"))
+            {
+                const fresh = buildSample(arena) catch |e| {
+                    try writeError(arena, id, -32603, @errorName(e));
+                    return;
+                };
+                cacheStore(fresh);
+                break :blk fresh;
+            }
+            try writeError(arena, id, -32601, "unknown tool");
+            return;
+        };
+
+        var resp: Buf = .empty;
+        defer resp.deinit(arena);
+        try resp.print(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":", .{id});
+        try jsonString(&resp, arena, inner);
+        try resp.appendSlice(arena, "}],\"isError\":false}}");
+        try writeFramed(resp.items);
+        return;
+    }
+    try writeError(arena, id, -32601, "method not found");
+}
+
+// ── Entry points ──────────────────────────────────────────────────────
+
+fn loadIntervalFromEnv() void {
+    if (getenv("TOKSTAT_INTERVAL_SECS")) |raw| {
+        const s = std.mem.span(raw);
+        if (std.fmt.parseInt(u32, s, 10)) |v| {
+            interval_secs = @max(v, interval_secs_floor);
+        } else |_| {}
+    }
+}
+
+fn runMcpLoop() !void {
+    loadIntervalFromEnv();
+    const backing = std.heap.smp_allocator;
+    while (true) {
+        var arena_state = std.heap.ArenaAllocator.init(backing);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const body = readFramed(arena) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+        handleMessage(arena, body) catch |err| {
+            // Last-ditch: emit an unframed log line on stderr.
+            var msg_buf: [128]u8 = undefined;
+            const m = std.fmt.bufPrint(&msg_buf, "tokstat handle error: {s}\n", .{@errorName(err)}) catch continue;
+            _ = libcWrite(stderr_fd, m) catch {};
+        };
+    }
+}
+
+fn runJsonlMode() !void {
+    const backing = std.heap.smp_allocator;
+    while (true) {
+        const json = try buildSample(backing);
+        defer backing.free(json);
+        _ = try libcWrite(stdout_fd, json);
+        _ = try libcWrite(stdout_fd, "\n");
+        _ = usleep(interval_secs * 1_000_000);
+    }
+}
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    var jsonl_mode = false;
+    var once_mode = false;
+    var it = init.args.iterate();
+    _ = it.next(); // argv[0]
+    while (it.next()) |arg_z| {
+        const arg: []const u8 = arg_z;
+        if (std.mem.eql(u8, arg, "--jsonl")) {
+            jsonl_mode = true;
+        } else if (std.mem.eql(u8, arg, "--once")) {
+            once_mode = true;
+            jsonl_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--interval=")) {
+            const v = std.fmt.parseInt(u32, arg["--interval=".len..], 10) catch interval_secs;
+            interval_secs = @max(v, 1); // CLI mode lets you go below the plugin floor
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            const help =
+                "tokstat — Claude usage probe\n" ++
+                "Usage:\n" ++
+                "  tokstat                # MCP stdio plugin mode (default)\n" ++
+                "  tokstat --jsonl        # stream one JSON line per tick\n" ++
+                "  tokstat --once         # single probe + exit\n" ++
+                "  tokstat --interval=N   # seconds between probes\n";
+            _ = libcWrite(stdout_fd, help) catch {};
+            return;
+        }
+    }
+
+    if (once_mode) {
+        const backing = std.heap.smp_allocator;
+        const json = try buildSample(backing);
+        defer backing.free(json);
+        _ = try libcWrite(stdout_fd, json);
+        _ = try libcWrite(stdout_fd, "\n");
+        return;
+    }
+    if (jsonl_mode) return runJsonlMode();
+    return runMcpLoop();
+}

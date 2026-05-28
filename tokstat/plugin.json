@@ -1,0 +1,52 @@
+{
+  "manifest": {
+    "id": "tokstat",
+    "name": "Token Usage Stats",
+    "version": "0.1.0",
+    "runtime": "json-ui-react",
+    "plugin": true,
+    "namespace": "tokstat",
+    "description": {
+      "default": "AI coding token-usage probe. Spawns the `claude` CLI in a PTY, sends `/usage`, strips ANSI and parses the Session + Weekly panels. v0.1: Claude only. Stdio MCP plugin or standalone `--jsonl` CLI.",
+      "zh": "AI 编程 token 用量探针。在 PTY 里跑 `claude /usage`，剥 ANSI 后解析 Session + Weekly 面板。v0.1 只支持 Claude。可作 stdio MCP plugin，也可 `--jsonl` 独立 CLI 跑。",
+      "ja": "AI コーディングのトークン使用量プローブ。PTY 上で `claude` CLI を起動して `/usage` を送り、ANSI を除去して Session + Weekly パネルを解析する。v0.1 は Claude のみ。"
+    },
+    "license": "MIT",
+    "keywords": ["claude", "usage", "tokens", "session", "weekly"],
+    "homepage": "https://github.com/agent-rt/aglet-plugins",
+    "actions": [
+      {
+        "name": "snapshot",
+        "params": [],
+        "result": [
+          { "key": "claude", "type": "object" }
+        ],
+        "permission": "exec:fork"
+      },
+      {
+        "name": "refresh",
+        "params": [],
+        "result": [
+          { "key": "claude", "type": "object" }
+        ],
+        "permission": "exec:fork"
+      }
+    ],
+    "backend": {
+      "kind": "stdio",
+      "path": "dist/tokstat",
+      "capabilities": [
+        "exec:fork",
+        "fs:read:any",
+        "net:none"
+      ],
+      "emits": ["sample"]
+    },
+    "dev": {
+      "build": { "cmd": ["zig", "build", "tokstat"], "cwd": ".." },
+      "watch": ["src/**", "plugin.json"],
+      "artifact": "dist/tokstat"
+    }
+  },
+  "ui": { "type": "Page" }
+}
