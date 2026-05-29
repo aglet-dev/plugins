@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
     // Native binary spawned by the host on stdin/stdout. Built for the
     // host target (no cross-compile to wasm). See aglet docs/STDIO_PLUGIN_SPEC.md.
     all.dependOn(addStdioNativePlugin(b, "sysmon"));
+    all.dependOn(addStdioNativePlugin(b, "tokstat"));
 }
 
 const CmakeDep = struct {
