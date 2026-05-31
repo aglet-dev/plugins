@@ -7,7 +7,7 @@ on:
       - "**/*.cpp"
       - "**/*.h"
       - "**/CMakeLists.txt"
-      - "**/plugin.json"
+      - "**/aplugin.json"
       - "build.zig"
       - "build.zig.zon"
       - ".github/workflows/validate.yml"

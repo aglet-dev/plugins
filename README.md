@@ -12,7 +12,7 @@ plugins — dependencies are resolved automatically.
 
 ```
 <id>/
-  plugin.json          # manifest
+  aplugin.json          # manifest
   src/wrapper.cpp      # source
   CMakeLists.txt       # emscripten build config
   build.sh             # → dist/<id>.wasm

@@ -42,8 +42,8 @@ jobs:
             PLUGIN="${TAG%-v*}"
             VERSION="${TAG##*-v}"
           fi
-          [ -f "$PLUGIN/plugin.json" ] || { echo "✗ $PLUGIN/plugin.json missing"; exit 1; }
-          MANIFEST_VER=$(jq -r .manifest.version "$PLUGIN/plugin.json")
+          [ -f "$PLUGIN/aplugin.json" ] || { echo "✗ $PLUGIN/aplugin.json missing"; exit 1; }
+          MANIFEST_VER=$(jq -r .manifest.version "$PLUGIN/aplugin.json")
           if [ "$MANIFEST_VER" != "$VERSION" ]; then
             echo "✗ tag $VERSION ≠ manifest.version $MANIFEST_VER"; exit 1
           fi
@@ -65,4 +65,4 @@ jobs:
           set -e
           gh auth setup-git
           export AGLET_REGISTRY_URL="https://github.com/agent-rt/aglet-registry.git"
-          aglet plugin publish "${{ steps.target.outputs.plugin }}/plugin.json"
+          aglet plugin publish "${{ steps.target.outputs.plugin }}/aplugin.json"

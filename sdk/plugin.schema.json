@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://aglet.dev/schemas/plugin.json",
+  "$id": "https://aglet.dev/schemas/aplugin.json",
   "title": "Aglet plugin manifest",
-  "description": "Canonical shape of plugin.json. See sdk/README.md for a tour. The Aglet runtime applies stricter validation at install time; this schema covers the structural fields editor tooling and CI can check ahead of build.",
+  "description": "Canonical shape of aplugin.json. See sdk/README.md for a tour. The Aglet runtime applies stricter validation at install time; this schema covers the structural fields editor tooling and CI can check ahead of build.",
   "type": "object",
   "required": ["manifest", "ui"],
   "additionalProperties": false,
@@ -113,7 +113,7 @@
         },
         "path": {
           "type": "string",
-          "description": "For `wasm` backends: path to the compiled `.wasm`, relative to plugin.json. By convention `dist/<id>.wasm`. For `stdio` backends: path to the executable, by convention `dist/<id>` (per OS/arch under `dist/<id>-<os>-<arch>` once multi-arch packaging lands)."
+          "description": "For `wasm` backends: path to the compiled `.wasm`, relative to aplugin.json. By convention `dist/<id>.wasm`. For `stdio` backends: path to the executable, by convention `dist/<id>` (per OS/arch under `dist/<id>-<os>-<arch>` once multi-arch packaging lands)."
         },
         "wasi_imports": {
           "type": "array",

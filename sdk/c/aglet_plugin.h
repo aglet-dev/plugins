@@ -110,7 +110,7 @@ inline std::vector<uint8_t> decodeB64(std::string_view s) {
 // ─── JSON helpers ────────────────────────────────────────────────────────────
 //
 // Lightweight key-based scanners. Suitable for the shallow JSON shapes used by
-// Aglet plugin params (typed by `plugin.json` schema, no nested key conflicts).
+// Aglet plugin params (typed by `aplugin.json` schema, no nested key conflicts).
 // Not a general-purpose JSON parser.
 
 namespace detail {

@@ -15,7 +15,7 @@ Copy the template directory under the repository root and rename it:
 ```bash
 cp -r sdk/templates/zig my-plugin
 cd my-plugin
-# Replace placeholders in plugin.json and src/wrapper.*:
+# Replace placeholders in aplugin.json and src/wrapper.*:
 #   {{id}}          → my-plugin
 #   {{Id}}          → My Plugin
 #   {{namespace}}   → my_plugin

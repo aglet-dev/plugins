@@ -72,7 +72,7 @@ std::string aglet_dispatch_action(std::string_view action,
 AGLET_PLUGIN_EXPORTS
 ```
 
-Pair either source with a `plugin.json` describing the actions (the host
+Pair either source with a `aplugin.json` describing the actions (the host
 runtime validates declarations against runtime calls) and you have a
 shipping plugin.
 
@@ -81,7 +81,7 @@ shipping plugin.
 ```
 sdk/
 ├── README.md              # this file
-├── plugin.schema.json     # JSON Schema for plugin.json (draft 2020-12)
+├── plugin.schema.json     # JSON Schema for aplugin.json (draft 2020-12)
 ├── zig/
 │   └── plugin.zig         # Zig SDK — Params / Result / runDispatch / exportRuntime
 ├── c/
@@ -92,7 +92,7 @@ sdk/
     └── cpp/               # C++17 emscripten starter
 ```
 
-## Validating plugin.json
+## Validating aplugin.json
 
 `plugin.schema.json` is a JSON Schema (draft 2020-12) covering the canonical
 manifest shape. Editors that understand JSON Schema (VS Code, JetBrains, etc.)
@@ -109,7 +109,7 @@ Or validate from CI:
 
 ```bash
 python3 -m pip install jsonschema
-python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('plugin.json')), json.load(open('../sdk/plugin.schema.json')))"
+python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('aplugin.json')), json.load(open('../sdk/plugin.schema.json')))"
 ```
 
 The Aglet runtime applies stricter validation at install time (cross-checking
@@ -146,7 +146,7 @@ This SDK is for **sandboxed wasm plugins**, which are the right shape for
 community contributions: pure computation, no host APIs. Plugins that need
 direct OS access (clipboard, filesystem, camera, system info, etc.) are
 shipped as static plugins inside the Aglet runtime itself. They use the
-same `plugin.json` schema but link against the runtime directly, so this
+same `aplugin.json` schema but link against the runtime directly, so this
 SDK does not apply to them.
 
 ## License
