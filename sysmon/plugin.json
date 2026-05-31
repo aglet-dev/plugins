@@ -2,7 +2,7 @@
   "manifest": {
     "id": "sysmon",
     "name": "Sysmon",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "runtime": "json-ui-react",
     "plugin": true,
     "namespace": "sysmon",
@@ -12,16 +12,41 @@
       "ja": "ホストシステムメトリクス：CPU・メモリ・ディスク。長命な stdio サブプロセス（zig ネイティブバイナリ。macOS は Mach API、Linux は /proc）が前回サンプルの状態を保持し、CPU の差分計測を行う。"
     },
     "license": "MIT",
-    "keywords": ["system", "monitoring", "cpu", "memory", "disk", "sysmon", "istat"],
+    "keywords": [
+      "system",
+      "monitoring",
+      "cpu",
+      "memory",
+      "disk",
+      "sysmon",
+      "istat"
+    ],
     "homepage": "https://github.com/agent-rt/aglet-plugins",
     "actions": [
       {
         "name": "snapshot",
         "params": [],
         "result": [
-          { "key": "cpu", "type": "object" },
-          { "key": "memory", "type": "object" },
-          { "key": "disk", "type": "object" }
+          {
+            "key": "cpu",
+            "type": "object"
+          },
+          {
+            "key": "memory",
+            "type": "object"
+          },
+          {
+            "key": "disk",
+            "type": "object"
+          },
+          {
+            "key": "battery",
+            "type": "object"
+          },
+          {
+            "key": "gpu",
+            "type": "object"
+          }
         ],
         "permission": "system:read"
       },
@@ -29,10 +54,22 @@
         "name": "cpu",
         "params": [],
         "result": [
-          { "key": "used_pct", "type": "number" },
-          { "key": "user_pct", "type": "number" },
-          { "key": "sys_pct", "type": "number" },
-          { "key": "idle_pct", "type": "number" }
+          {
+            "key": "used_pct",
+            "type": "number"
+          },
+          {
+            "key": "user_pct",
+            "type": "number"
+          },
+          {
+            "key": "sys_pct",
+            "type": "number"
+          },
+          {
+            "key": "idle_pct",
+            "type": "number"
+          }
         ],
         "permission": "system:read"
       },
@@ -40,22 +77,88 @@
         "name": "memory",
         "params": [],
         "result": [
-          { "key": "used_bytes", "type": "integer" },
-          { "key": "total_bytes", "type": "integer" },
-          { "key": "used_pct", "type": "number" }
+          {
+            "key": "used_bytes",
+            "type": "integer"
+          },
+          {
+            "key": "total_bytes",
+            "type": "integer"
+          },
+          {
+            "key": "used_pct",
+            "type": "number"
+          }
         ],
         "permission": "system:read"
       },
       {
         "name": "disk",
         "params": [
-          { "key": "path", "type": "string" }
+          {
+            "key": "path",
+            "type": "string"
+          }
         ],
         "result": [
-          { "key": "used_bytes", "type": "integer" },
-          { "key": "total_bytes", "type": "integer" },
-          { "key": "free_bytes", "type": "integer" },
-          { "key": "used_pct", "type": "number" }
+          {
+            "key": "used_bytes",
+            "type": "integer"
+          },
+          {
+            "key": "total_bytes",
+            "type": "integer"
+          },
+          {
+            "key": "free_bytes",
+            "type": "integer"
+          },
+          {
+            "key": "used_pct",
+            "type": "number"
+          }
+        ],
+        "permission": "system:read"
+      },
+      {
+        "name": "battery",
+        "params": [],
+        "result": [
+          {
+            "key": "present",
+            "type": "boolean"
+          },
+          {
+            "key": "percent",
+            "type": "number"
+          },
+          {
+            "key": "charging",
+            "type": "boolean"
+          },
+          {
+            "key": "power_source",
+            "type": "string"
+          },
+          {
+            "key": "time_remaining_min",
+            "type": "integer"
+          }
+        ],
+        "permission": "system:read"
+      },
+      {
+        "name": "gpu",
+        "params": [],
+        "result": [
+          {
+            "key": "util_pct",
+            "type": "number"
+          },
+          {
+            "key": "mem_used_bytes",
+            "type": "integer"
+          }
         ],
         "permission": "system:read"
       }
@@ -68,8 +171,12 @@
         "fs:read:/sys",
         "net:none"
       ],
-      "emits": ["cpu"]
+      "emits": [
+        "cpu"
+      ]
     }
   },
-  "ui": { "type": "Page" }
+  "ui": {
+    "type": "Page"
+  }
 }

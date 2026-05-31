@@ -331,6 +331,147 @@ fn writeDiskJson(buf: *Buf, alloc: std.mem.Allocator, s: DiskSample) !void {
     try buf.append(alloc, '}');
 }
 
+// ── battery + GPU via IOKit / CoreFoundation (macOS) ──────────────────────
+//
+// battery: IOPSCopyPowerSourcesInfo + IOPSGetPowerSourceDescription → CF dict
+//          ("Current Capacity"/"Max Capacity"/"Is Charging"/"Power Source
+//          State"/"Time to Empty|Full")。台式机无电源 → present=false。
+// gpu:     IOServiceMatching("IOAccelerator") → IORegistryEntryCreateCFProperty
+//          ("PerformanceStatistics") → "Device Utilization %" + "In use system
+//          memory"。本机已验证这些键存在（公开 IORegistry，非私有 framework）。
+// 链 IOKit + CoreFoundation framework（build.zig，仅 macOS）。
+
+const BatterySample = struct {
+    present: bool = false,
+    percent: f64 = 0,
+    charging: bool = false,
+    power_source: []const u8 = "Unknown", // "AC Power" | "Battery Power"
+    time_remaining_min: i64 = -1, // -1 = 计算中/未知
+};
+const GpuSample = struct { util_pct: f64 = 0, mem_used_bytes: u64 = 0 };
+
+const CFRef = ?*anyopaque;
+const kCFStringEncodingUTF8: u32 = 0x08000100;
+const kCFNumberSInt64Type: c_int = 4;
+
+extern "c" fn CFRelease(cf: CFRef) void;
+extern "c" fn CFArrayGetCount(arr: CFRef) c_long;
+extern "c" fn CFArrayGetValueAtIndex(arr: CFRef, idx: c_long) CFRef;
+extern "c" fn CFDictionaryGetValue(dict: CFRef, key: ?*const anyopaque) ?*const anyopaque;
+extern "c" fn CFStringCreateWithCString(alloc: CFRef, cstr: [*:0]const u8, enc: u32) CFRef;
+extern "c" fn CFNumberGetValue(num: ?*const anyopaque, theType: c_int, valuePtr: *anyopaque) bool;
+extern "c" fn CFBooleanGetValue(b: ?*const anyopaque) bool;
+extern "c" fn CFGetTypeID(cf: ?*const anyopaque) c_ulong;
+extern "c" fn CFNumberGetTypeID() c_ulong;
+extern "c" fn CFBooleanGetTypeID() c_ulong;
+extern "c" fn CFStringGetTypeID() c_ulong;
+extern "c" fn CFStringGetCString(s: ?*const anyopaque, buf: [*]u8, sz: c_long, enc: u32) bool;
+
+extern "c" fn IOPSCopyPowerSourcesInfo() CFRef;
+extern "c" fn IOPSCopyPowerSourcesList(blob: CFRef) CFRef;
+extern "c" fn IOPSGetPowerSourceDescription(blob: CFRef, ps: CFRef) CFRef;
+
+extern "c" fn IOServiceMatching(name: [*:0]const u8) CFRef;
+extern "c" fn IOServiceGetMatchingServices(mainPort: c_uint, matching: CFRef, existing: *c_uint) c_int;
+extern "c" fn IOIteratorNext(iterator: c_uint) c_uint;
+extern "c" fn IORegistryEntryCreateCFProperty(entry: c_uint, key: CFRef, allocator: CFRef, options: u32) CFRef;
+extern "c" fn IOObjectRelease(object: c_uint) c_int;
+
+/// dict[key] → f64（CFNumber）。缺/类型不符 → null。
+fn cfDictNum(dict: CFRef, key: [*:0]const u8) ?f64 {
+    const k = CFStringCreateWithCString(null, key, kCFStringEncodingUTF8) orelse return null;
+    defer CFRelease(k);
+    const v = CFDictionaryGetValue(dict, k) orelse return null;
+    if (CFGetTypeID(v) != CFNumberGetTypeID()) return null;
+    var out: i64 = 0;
+    if (!CFNumberGetValue(v, kCFNumberSInt64Type, &out)) return null;
+    return @floatFromInt(out);
+}
+
+/// dict[key] → bool（CFBoolean）。
+fn cfDictBool(dict: CFRef, key: [*:0]const u8) ?bool {
+    const k = CFStringCreateWithCString(null, key, kCFStringEncodingUTF8) orelse return null;
+    defer CFRelease(k);
+    const v = CFDictionaryGetValue(dict, k) orelse return null;
+    if (CFGetTypeID(v) != CFBooleanGetTypeID()) return null;
+    return CFBooleanGetValue(v);
+}
+
+/// "Power Source State" → 归一成 "AC Power"/"Battery Power"。
+fn cfDictPowerState(dict: CFRef) []const u8 {
+    const k = CFStringCreateWithCString(null, "Power Source State", kCFStringEncodingUTF8) orelse return "Unknown";
+    defer CFRelease(k);
+    const v = CFDictionaryGetValue(dict, k) orelse return "Unknown";
+    if (CFGetTypeID(v) != CFStringGetTypeID()) return "Unknown";
+    var buf: [64]u8 = undefined;
+    if (!CFStringGetCString(v, &buf, buf.len, kCFStringEncodingUTF8)) return "Unknown";
+    const s = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&buf)), 0);
+    if (std.mem.indexOf(u8, s, "AC") != null) return "AC Power";
+    if (std.mem.indexOf(u8, s, "Battery") != null) return "Battery Power";
+    return "Unknown";
+}
+
+fn batterySample() BatterySample {
+    if (builtin.os.tag != .macos) return .{}; // present=false on non-macOS (v1)
+    const blob = IOPSCopyPowerSourcesInfo() orelse return .{};
+    defer CFRelease(blob);
+    const list = IOPSCopyPowerSourcesList(blob) orelse return .{};
+    defer CFRelease(list);
+    if (CFArrayGetCount(list) == 0) return .{}; // 台式机无电源 → present=false
+    const ps = CFArrayGetValueAtIndex(list, 0);
+    const desc = IOPSGetPowerSourceDescription(blob, ps) orelse return .{};
+    const cur = cfDictNum(desc, "Current Capacity") orelse 0;
+    const max = cfDictNum(desc, "Max Capacity") orelse 100;
+    const pct = if (max > 0) 100.0 * cur / max else cur;
+    const charging = cfDictBool(desc, "Is Charging") orelse false;
+    const ttf = cfDictNum(desc, "Time to Full") orelse -1;
+    const tte = cfDictNum(desc, "Time to Empty") orelse -1;
+    const remaining: f64 = if (charging) ttf else tte;
+    return .{
+        .present = true,
+        .percent = pct,
+        .charging = charging,
+        .power_source = cfDictPowerState(desc),
+        .time_remaining_min = if (remaining >= 0) @intFromFloat(remaining) else -1,
+    };
+}
+
+fn gpuSample() GpuSample {
+    if (builtin.os.tag != .macos) return .{};
+    const matching = IOServiceMatching("IOAccelerator") orelse return .{};
+    var iter: c_uint = 0;
+    // 注意：IOServiceGetMatchingServices 消费 matching dict，不要再 release。
+    if (IOServiceGetMatchingServices(0, matching, &iter) != 0) return .{};
+    defer _ = IOObjectRelease(iter);
+    var best: GpuSample = .{};
+    while (true) {
+        const svc = IOIteratorNext(iter);
+        if (svc == 0) break;
+        defer _ = IOObjectRelease(svc);
+        const key = CFStringCreateWithCString(null, "PerformanceStatistics", kCFStringEncodingUTF8) orelse continue;
+        defer CFRelease(key);
+        const perf = IORegistryEntryCreateCFProperty(svc, key, null, 0) orelse continue;
+        defer CFRelease(perf);
+        const util = cfDictNum(perf, "Device Utilization %") orelse continue;
+        const mem = cfDictNum(perf, "In use system memory") orelse 0;
+        // 多 GPU 取利用率最高的（集显/独显）。
+        if (util >= best.util_pct) best = .{ .util_pct = util, .mem_used_bytes = @intFromFloat(@max(mem, 0)) };
+    }
+    return best;
+}
+
+fn writeBatteryJson(buf: *Buf, alloc: std.mem.Allocator, s: BatterySample) !void {
+    try buf.print(alloc, "{{\"present\":{},\"percent\":", .{s.present});
+    try jsonNumber(buf, alloc, s.percent);
+    try buf.print(alloc, ",\"charging\":{},\"power_source\":\"{s}\",\"time_remaining_min\":{d}}}", .{ s.charging, s.power_source, s.time_remaining_min });
+}
+
+fn writeGpuJson(buf: *Buf, alloc: std.mem.Allocator, s: GpuSample) !void {
+    try buf.appendSlice(alloc, "{\"util_pct\":");
+    try jsonNumber(buf, alloc, s.util_pct);
+    try buf.print(alloc, ",\"mem_used_bytes\":{d}}}", .{s.mem_used_bytes});
+}
+
 // Build the inner JSON value (cpu/memory/disk or snapshot envelope) into
 // the arena buffer. Caller wraps with MCP envelope.
 fn buildToolResult(
@@ -347,6 +488,10 @@ fn buildToolResult(
         try writeMemJson(&out, arena, memSample());
         try out.appendSlice(arena, ",\"disk\":");
         try writeDiskJson(&out, arena, diskSample(disk_path));
+        try out.appendSlice(arena, ",\"battery\":");
+        try writeBatteryJson(&out, arena, batterySample());
+        try out.appendSlice(arena, ",\"gpu\":");
+        try writeGpuJson(&out, arena, gpuSample());
         try out.append(arena, '}');
     } else if (std.mem.eql(u8, tool, "sysmon.cpu")) {
         try writeCpuJson(&out, arena, cpuSample());
@@ -354,6 +499,10 @@ fn buildToolResult(
         try writeMemJson(&out, arena, memSample());
     } else if (std.mem.eql(u8, tool, "sysmon.disk")) {
         try writeDiskJson(&out, arena, diskSample(disk_path));
+    } else if (std.mem.eql(u8, tool, "sysmon.battery")) {
+        try writeBatteryJson(&out, arena, batterySample());
+    } else if (std.mem.eql(u8, tool, "sysmon.gpu")) {
+        try writeGpuJson(&out, arena, gpuSample());
     } else {
         return error.UnknownTool;
     }

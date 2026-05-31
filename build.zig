@@ -147,6 +147,12 @@ fn addStdioNativePlugin(b: *std.Build, id: []const u8) *std.Build.Step {
         .name = id,
         .root_module = mod,
     });
+    // macOS: sysmon 的 battery(IOKit IOPS) / gpu(IORegistry) 走 IOKit +
+    // CoreFoundation。两者系统自带，给所有 stdio plugin 链上无害。
+    if (target.result.os.tag == .macos) {
+        mod.linkFramework("IOKit", .{});
+        mod.linkFramework("CoreFoundation", .{});
+    }
 
     const install = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = b.fmt("../{s}/dist", .{id}) } },
