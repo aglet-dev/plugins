@@ -3,7 +3,6 @@
     "id": "tokstat",
     "name": "Token Usage Stats",
     "version": "0.2.0",
-    "runtime": "json-ui-react",
     "plugin": true,
     "namespace": "tokstat",
     "description": {

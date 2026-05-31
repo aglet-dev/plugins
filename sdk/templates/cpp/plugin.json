@@ -3,7 +3,6 @@
     "id": "{{id}}",
     "name": "{{Id}}",
     "version": "0.1.0",
-    "runtime": "json-ui-react",
     "plugin": true,
     "namespace": "{{namespace}}",
     "description": "{{description}}",

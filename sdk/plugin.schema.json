@@ -16,7 +16,7 @@
   "$defs": {
     "manifest": {
       "type": "object",
-      "required": ["id", "name", "version", "runtime", "plugin", "namespace", "actions", "backend"],
+      "required": ["id", "name", "version", "plugin", "namespace", "actions", "backend"],
       "additionalProperties": false,
       "properties": {
         "id": {
@@ -34,10 +34,6 @@
           "type": "string",
           "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
           "description": "Semantic version (`MAJOR.MINOR.PATCH`, with optional pre-release / build metadata)."
-        },
-        "runtime": {
-          "const": "json-ui-react",
-          "description": "Manifest runtime tag. Plugins always use the React-shaped manifest schema even though they have no UI."
         },
         "plugin": {
           "const": true,

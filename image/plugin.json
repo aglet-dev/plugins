@@ -3,7 +3,6 @@
     "id": "image",
     "name": "Image",
     "version": "0.1.1",
-    "runtime": "json-ui-react",
     "plugin": true,
     "namespace": "image",
     "actions": [
