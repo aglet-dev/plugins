@@ -2,7 +2,7 @@
   "manifest": {
     "id": "crypto",
     "name": "Crypto",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "plugin": true,
     "namespace": "crypto",
     "description": {
@@ -102,6 +102,21 @@
         "params": [{ "key": "n", "type": "integer" }],
         "result": [{ "key": "bytes_b64", "type": "string" }],
         "permission": "crypto:random"
+      },
+      {
+        "name": "totp",
+        "params": [
+          { "key": "secret_b32",   "type": "string" },
+          { "key": "unix_seconds", "type": "integer" },
+          { "key": "algo",         "type": "string" },
+          { "key": "digits",       "type": "integer" },
+          { "key": "period",       "type": "integer" }
+        ],
+        "result": [
+          { "key": "code",      "type": "string" },
+          { "key": "remaining", "type": "integer" }
+        ],
+        "permission": "crypto:totp"
       }
     ],
     "backend": {

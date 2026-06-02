@@ -182,12 +182,12 @@ pub fn ok(arena: std.mem.Allocator, fields: anytype) ![]const u8 {
             },
             .bool => try buf.appendSlice(arena, if (v) "true" else "false"),
             .int, .comptime_int => {
-                var w = buf.writer(arena);
-                try w.print("{d}", .{v});
+                var nb: [32]u8 = undefined;
+                try buf.appendSlice(arena, try std.fmt.bufPrint(&nb, "{d}", .{v}));
             },
             .float, .comptime_float => {
-                var w = buf.writer(arena);
-                try w.print("{d}", .{v});
+                var nb: [64]u8 = undefined;
+                try buf.appendSlice(arena, try std.fmt.bufPrint(&nb, "{d}", .{v}));
             },
             else => @compileError("sdk.ok: unsupported type for field '" ++ f.name ++ "': " ++ @typeName(T)),
         }

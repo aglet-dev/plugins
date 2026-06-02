@@ -14,6 +14,8 @@
 //!   sign({sec_b64, data_b64}) → {sig_b64}
 //!   verify({pub_b64, data_b64, sig_b64}) → {ok: bool}
 //!   random({n}) → {bytes_b64}                           CSPRNG (getrandom via WASI)
+//!   totp({secret_b32, unix_seconds, algo=SHA1, digits=6, period=30}) → {code, remaining}
+//!     RFC 6238 TOTP（base32 解码 + HOTP 截断都在插件内，app 不手搓）
 
 const std = @import("std");
 const crypto = std.crypto;
@@ -32,6 +34,55 @@ fn io() std.Io {
 /// (getrandom on Linux, SecRandomCopyBytes on Apple, etc.) inside its sandbox.
 fn csprng(buf: []u8) void {
     _ = std.os.wasi.random_get(buf.ptr, buf.len);
+}
+
+// ─── totp helpers (file-scope: NOT in Handlers, else runDispatch treats them
+//     as actions) ──────────────────────────────────────────────────────────
+
+/// RFC 4648 base32 decode（A-Z2-7，大小写皆可，忽略 '=' / 空白 / '-'）。
+/// 输出写进 arena。Authenticator secret 用的就是这个。
+fn base32Decode(arena: std.mem.Allocator, s: []const u8) ![]u8 {
+    const out = try arena.alloc(u8, s.len); // 5/8 < 1，上界足够
+    var n: usize = 0;
+    var acc: u32 = 0;
+    var bits: u32 = 0;
+    for (s) |ch| {
+        const v: u8 = switch (ch) {
+            'A'...'Z' => ch - 'A',
+            'a'...'z' => ch - 'a',
+            '2'...'7' => ch - '2' + 26,
+            '=', ' ', '\r', '\n', '\t', '-' => continue,
+            else => return error.InvalidBase32,
+        };
+        acc = (acc << 5) | v;
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            out[n] = @intCast((acc >> @as(u5, @intCast(bits))) & 0xFF);
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+/// HMAC(key, msg) by algo（sha1/sha256/sha512，大小写不敏感）→ 写进 out，返长度。
+fn hmacInto(algo: []const u8, key: []const u8, msg: []const u8, out: *[64]u8) !usize {
+    if (std.ascii.eqlIgnoreCase(algo, "sha1")) {
+        const H = crypto.auth.hmac.HmacSha1;
+        H.create(out[0..H.mac_length], msg, key);
+        return H.mac_length;
+    }
+    if (std.ascii.eqlIgnoreCase(algo, "sha256")) {
+        const H = crypto.auth.hmac.sha2.HmacSha256;
+        H.create(out[0..H.mac_length], msg, key);
+        return H.mac_length;
+    }
+    if (std.ascii.eqlIgnoreCase(algo, "sha512")) {
+        const H = crypto.auth.hmac.sha2.HmacSha512;
+        H.create(out[0..H.mac_length], msg, key);
+        return H.mac_length;
+    }
+    return error.BadAlgo;
 }
 
 // ─── wasm exports (alloc/free + dispatch) ───────────────────────────────────
@@ -217,5 +268,59 @@ const Handlers = struct {
         const buf = try p.arena.alloc(u8, @intCast(n));
         csprng(buf);
         return sdk.okBytes(p.arena, "bytes_b64", buf);
+    }
+
+    /// totp({secret_b32, unix_seconds, algo="SHA1", digits=6, period=30})
+    ///   → {code: "492039", remaining: 17}
+    /// RFC 6238 TOTP（= RFC 4226 HOTP，counter = unix/period）。把 base32 解码
+    /// + 8 字节大端 counter + 动态截断都收进插件，app 不用手搓密码学。
+    pub fn totp(p: *sdk.Params) anyerror![]const u8 {
+        const secret_b32 = p.str("secret_b32") orelse
+            return sdk.errInvalid(p.arena, "secret_b32 required");
+        const unix_seconds = p.int("unix_seconds", 0);
+        const algo = p.str("algo") orelse "SHA1";
+        const digits = p.int("digits", 6);
+        const period = p.int("period", 30);
+
+        if (unix_seconds < 0) return sdk.errInvalid(p.arena, "unix_seconds must be ≥ 0");
+        if (period <= 0) return sdk.errInvalid(p.arena, "period must be > 0");
+        if (digits < 6 or digits > 8) return sdk.errInvalid(p.arena, "digits must be 6..8");
+
+        const key = base32Decode(p.arena, secret_b32) catch
+            return sdk.errInvalid(p.arena, "invalid base32 secret");
+        if (key.len == 0) return sdk.errInvalid(p.arena, "empty secret");
+
+        // 8-byte big-endian time counter.
+        const counter: u64 = @as(u64, @intCast(unix_seconds)) / @as(u64, @intCast(period));
+        var msg: [8]u8 = undefined;
+        std.mem.writeInt(u64, &msg, counter, .big);
+
+        var mac: [64]u8 = undefined;
+        const mac_len = hmacInto(algo, key, &msg, &mac) catch
+            return sdk.errInvalid(p.arena, "algo must be SHA1 / SHA256 / SHA512");
+
+        // RFC 4226 dynamic truncation.
+        const offset: usize = mac[mac_len - 1] & 0x0f;
+        const bin: u32 = (@as(u32, mac[offset] & 0x7f) << 24) |
+            (@as(u32, mac[offset + 1]) << 16) |
+            (@as(u32, mac[offset + 2]) << 8) |
+            @as(u32, mac[offset + 3]);
+
+        var modulo: u32 = 1;
+        var i: i64 = 0;
+        while (i < digits) : (i += 1) modulo *= 10;
+        const code_num = bin % modulo;
+
+        // zero-pad to `digits`.
+        var nbuf: [16]u8 = undefined;
+        const ns = std.fmt.bufPrint(&nbuf, "{d}", .{code_num}) catch unreachable;
+        const width: usize = @intCast(digits);
+        const code = try p.arena.alloc(u8, width);
+        const pad = width - ns.len;
+        @memset(code[0..pad], '0');
+        @memcpy(code[pad..], ns);
+
+        const remaining = period - @rem(unix_seconds, period);
+        return sdk.ok(p.arena, .{ .code = code, .remaining = remaining });
     }
 };
