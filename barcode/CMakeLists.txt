@@ -33,18 +33,17 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
 endif()
 
-# wasm-EH（native wasm exception handling，post-MVP 提案）。zxing-cpp 在
-# header 里直接 throw，-fno-exceptions 编不过；emscripten JS-based exception
-# (默认) 走 invoke_* / __cxa_* env imports，wasm3 没 JS env 满足不了。
-# 当前选 -fwasm-exceptions 出 valid wasm，但 **wasm3 v0.5 不支持 EH 提案**，
-# load 时 Parse 失败 → host fail-soft warn。下个 milestone 升 wasmtime/wasmer
-# 或迁 wasm3 fork 后才能跑起来。
+# wasm-EH（native wasm exception handling）。zxing-cpp 在 header 里直接 throw，
+# -fno-exceptions 编不过；emscripten JS-based exception (默认) 走 invoke_* /
+# __cxa_* env imports，无 JS env 的 host 满足不了。所以用 -fwasm-exceptions 出
+# native EH。
 add_compile_options(-fwasm-exceptions)
 add_link_options(-fwasm-exceptions)
-# 用新版 EH（try_table），不要 legacy try/catch —— wasmtime v45 只 surface 出
-# wasm_exceptions（新版）的 C API config，没暴露 legacy_exceptions。
-add_compile_options(-sWASM_LEGACY_EXCEPTIONS=0)
-add_link_options(-sWASM_LEGACY_EXCEPTIONS=0)
+# 用 legacy try/catch EH（不是新版 try_table）—— host 跑 WAMR classic 解释器，
+# WAMR 稳定支持的是 legacy 提案（WAMR_BUILD_EXCE_HANDLING=1，仅 classic-interp）。
+# 新版 try_table 在 WAMR 还在开发中（RFC #3753），故锁 legacy。
+add_compile_options(-sWASM_LEGACY_EXCEPTIONS=1)
+add_link_options(-sWASM_LEGACY_EXCEPTIONS=1)
 
 add_subdirectory(${ZXING_CPP_ROOT}/core ${CMAKE_BINARY_DIR}/ZXing)
 
