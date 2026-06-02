@@ -41,6 +41,9 @@ pub fn build(b: *std.Build) void {
     // ── Pure-zig plugins (wasm32-wasi via std.crypto / stdlib) ─────────────
     all.dependOn(addZigPlugin(b, "crypto"));
 
+    // ── Rust plugins (wasm32-wasip1，C 依赖经 zig cc 编) ────────────────────
+    all.dependOn(addRustPlugin(b, "highlight"));
+
     // ── Stdio plugins (subprocess + MCP JSON-RPC) ──────────────────────────
     // Native binary spawned by the host on stdin/stdout. Built for the
     // host target (no cross-compile to wasm). See aglet docs/STDIO_PLUGIN_SPEC.md.
@@ -93,6 +96,34 @@ fn addCmakePlugin(b: *std.Build, spec: CmakeSpec) *std.Build.Step {
     stage.step.dependOn(&build_cmd.step);
 
     const step = b.step(spec.id, b.fmt("Build {s}/dist/{s}.wasm", .{ spec.id, spec.id }));
+    step.dependOn(&stage.step);
+    return step;
+}
+
+/// Build `<id>/` (a Rust cdylib) to wasm32-wasip1, stage to `<id>/dist/<id>.wasm`.
+/// C 依赖（tree-sitter grammar 等）经 `.cargo-cc/zig-wasi-cc`（包 `zig cc`，自带
+/// wasi-libc，关 ubsan）编译——免装 wasi-sdk。需 `cargo` + wasm32-wasip1 target +
+/// `zig` 在 PATH。host 侧支持见 wasm_runtime.zig（agl_free 回退 + environ stub）。
+fn addRustPlugin(b: *std.Build, id: []const u8) *std.Build.Step {
+    const dir = b.pathFromRoot(id);
+    const cc = b.pathFromRoot(b.fmt("{s}/.cargo-cc/zig-wasi-cc", .{id}));
+    const ar = b.pathFromRoot(b.fmt("{s}/.cargo-cc/zig-ar", .{id}));
+
+    const build_cmd = b.addSystemCommand(&.{ "cargo", "build", "--release", "--target", "wasm32-wasip1" });
+    build_cmd.setCwd(.{ .cwd_relative = dir });
+    build_cmd.setEnvironmentVariable("CC_wasm32_wasip1", cc);
+    build_cmd.setEnvironmentVariable("AR_wasm32_wasip1", ar);
+    build_cmd.setEnvironmentVariable("CRATE_CC_NO_DEFAULTS", "1");
+
+    const stage = b.addSystemCommand(&.{ "sh", "-c" });
+    stage.addArg(b.fmt(
+        \\set -e
+        \\mkdir -p {s}/dist
+        \\cp {s}/target/wasm32-wasip1/release/{s}.wasm {s}/dist/{s}.wasm
+    , .{ dir, dir, id, dir, id }));
+    stage.step.dependOn(&build_cmd.step);
+
+    const step = b.step(id, b.fmt("Build {s}/dist/{s}.wasm (rust/tree-sitter)", .{ id, id }));
     step.dependOn(&stage.step);
     return step;
 }

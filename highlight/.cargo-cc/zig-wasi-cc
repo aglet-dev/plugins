@@ -1,0 +1,12 @@
+#!/bin/sh
+# cc-rs 的 C 编译器:用 zig cc 编到 wasm32-wasi(自带 wasi-libc)。
+# 过滤掉 cc-rs 传的 clang triple；关 UBSan（否则 grammar 引入 __ubsan_handle_* import）。
+args=""
+for a in "$@"; do
+  case "$a" in
+    --target=*) ;;
+    -target) skip=1 ;;
+    *) if [ "$skip" = 1 ]; then skip=0; else args="$args \"$a\""; fi ;;
+  esac
+done
+eval exec zig cc -target wasm32-wasi -fno-sanitize=all $args

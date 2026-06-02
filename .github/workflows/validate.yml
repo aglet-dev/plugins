@@ -6,6 +6,9 @@ on:
       - "**/*.zig"
       - "**/*.cpp"
       - "**/*.h"
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
       - "**/CMakeLists.txt"
       - "**/aplugin.json"
       - "build.zig"
@@ -27,6 +30,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+
+      # Rust 插件（highlight 等）：cargo→wasm32-wasip1；C 依赖经 zig cc 编（用上面的 zig）。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
 
       - name: Install emscripten
         run: brew install emscripten

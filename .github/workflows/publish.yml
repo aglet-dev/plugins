@@ -30,6 +30,11 @@ jobs:
         with:
           version: 0.16.0
 
+      # Rust 插件（highlight 等）走 cargo→wasm32-wasip1（C 依赖经 zig cc）。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
       - name: Resolve target
         id: target
         run: |
