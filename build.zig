@@ -21,13 +21,9 @@ pub fn build(b: *std.Build) void {
     const archive_dep = b.dependency("libarchive", .{}).path("");
     const xz_dep = b.dependency("xz", .{}).path("");
     const zstd_dep = b.dependency("zstd", .{}).path("");
-    const md4c_dep = b.dependency("md4c", .{}).path("");
 
     all.dependOn(addCmakePlugin(b, .{ .id = "barcode", .deps = &.{
         .{ .env = "ZXING_CPP_ROOT", .path = zxing },
-    } }));
-    all.dependOn(addCmakePlugin(b, .{ .id = "markdown", .deps = &.{
-        .{ .env = "MD4C_ROOT", .path = md4c_dep },
     } }));
     all.dependOn(addCmakePlugin(b, .{ .id = "image", .deps = &.{
         .{ .env = "LIBWEBP_ROOT", .path = webp },
@@ -43,6 +39,7 @@ pub fn build(b: *std.Build) void {
 
     // ── Rust plugins (wasm32-wasip1，C 依赖经 zig cc 编) ────────────────────
     all.dependOn(addRustPlugin(b, "highlight"));
+    all.dependOn(addRustPlugin(b, "markdown")); // comrak → IR node 树（pure Rust，无 C）
 
     // ── Stdio plugins (subprocess + MCP JSON-RPC) ──────────────────────────
     // Native binary spawned by the host on stdin/stdout. Built for the
