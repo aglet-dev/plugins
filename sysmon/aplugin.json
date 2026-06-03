@@ -2,7 +2,7 @@
   "manifest": {
     "id": "sysmon",
     "name": "Sysmon",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "plugin": true,
     "namespace": "sysmon",
     "description": {
@@ -52,6 +52,10 @@
           },
           {
             "key": "fan",
+            "type": "object"
+          },
+          {
+            "key": "network",
             "type": "object"
           }
         ],
@@ -207,6 +211,29 @@
           {
             "key": "rpm",
             "type": "number"
+          }
+        ],
+        "permission": "system:read"
+      },
+      {
+        "name": "network",
+        "params": [],
+        "result": [
+          {
+            "key": "rx_bytes_per_sec",
+            "type": "number"
+          },
+          {
+            "key": "tx_bytes_per_sec",
+            "type": "number"
+          },
+          {
+            "key": "rx_total",
+            "type": "integer"
+          },
+          {
+            "key": "tx_total",
+            "type": "integer"
           }
         ],
         "permission": "system:read"

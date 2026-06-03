@@ -295,6 +295,93 @@ fn diskSample(path_buf: [*:0]const u8) DiskSample {
     return .{ .used_bytes = used, .total_bytes = total, .free_bytes = free, .used_pct = pct };
 }
 
+// ── network (getifaddrs + if_data64 cumulative bytes → per-second rate) ──
+// 镜像 aglet/src/plugins/sysinfo 的 net 采样（proven struct layout）。跳 lo*；
+// 全接口 rx/tx 累加，两次采样差 / 时间差 = bytes/sec（首调返 rate=0）。
+
+const SOCK_AF_LINK: u8 = 18; // AF_LINK on darwin
+
+const Sockaddr = extern struct { sa_len: u8, sa_family: u8, sa_data: [14]u8 };
+
+const IfData64 = extern struct {
+    ifi_type: u8 = 0,        ifi_typelen: u8 = 0,   ifi_physical: u8 = 0,  ifi_addrlen: u8 = 0,
+    ifi_hdrlen: u8 = 0,      ifi_recvquota: u8 = 0, ifi_xmitquota: u8 = 0, ifi_unused1: u8 = 0,
+    ifi_mtu: u32 = 0,        ifi_metric: u32 = 0,   ifi_baudrate: u64 = 0,
+    ifi_ipackets: u64 = 0,   ifi_ierrors: u64 = 0,  ifi_opackets: u64 = 0, ifi_oerrors: u64 = 0,
+    ifi_collisions: u64 = 0, ifi_ibytes: u64 = 0,   ifi_obytes: u64 = 0,
+    ifi_imcasts: u64 = 0,    ifi_omcasts: u64 = 0,  ifi_iqdrops: u64 = 0,  ifi_noproto: u64 = 0,
+    ifi_recvtiming: u32 = 0, ifi_xmittiming: u32 = 0,
+    ifi_lastchange: extern struct { tv_sec: i64 = 0, tv_usec: i32 = 0 } = .{},
+};
+
+const Ifaddrs = extern struct {
+    ifa_next: ?*Ifaddrs,
+    ifa_name: [*:0]const u8,
+    ifa_flags: c_uint,
+    ifa_addr: ?*Sockaddr,
+    ifa_netmask: ?*Sockaddr,
+    ifa_dstaddr: ?*Sockaddr,
+    ifa_data: ?*anyopaque,
+};
+
+extern "c" fn getifaddrs(ifap: *?*Ifaddrs) c_int;
+extern "c" fn freeifaddrs(ifa: ?*Ifaddrs) void;
+
+fn netNowMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+const NetTotals = struct { rx: u64, tx: u64, ts_ms: i64 };
+var prior_net: ?NetTotals = null;
+
+const NetSample = struct {
+    rx_bytes_per_sec: f64,
+    tx_bytes_per_sec: f64,
+    rx_total: u64,
+    tx_total: u64,
+};
+
+fn sampleNetTotals() !NetTotals {
+    var head: ?*Ifaddrs = null;
+    if (getifaddrs(&head) != 0) return error.OSCall;
+    defer freeifaddrs(head);
+    var rx: u64 = 0;
+    var tx: u64 = 0;
+    var node = head;
+    while (node) |n| : (node = n.ifa_next) {
+        const sa = n.ifa_addr orelse continue;
+        if (sa.sa_family != SOCK_AF_LINK) continue;
+        const name = std.mem.sliceTo(n.ifa_name, 0);
+        if (std.mem.startsWith(u8, name, "lo")) continue; // skip loopback
+        const d: *const IfData64 = if (n.ifa_data) |p| @ptrCast(@alignCast(p)) else continue;
+        rx += d.ifi_ibytes;
+        tx += d.ifi_obytes;
+    }
+    return .{ .rx = rx, .tx = tx, .ts_ms = netNowMs() };
+}
+
+fn netSample() NetSample {
+    const now = sampleNetTotals() catch {
+        return .{ .rx_bytes_per_sec = 0, .tx_bytes_per_sec = 0, .rx_total = 0, .tx_total = 0 };
+    };
+    defer prior_net = now;
+    const prev = prior_net orelse {
+        // First call after spawn: no delta yet — rate 0, totals real.
+        return .{ .rx_bytes_per_sec = 0, .tx_bytes_per_sec = 0, .rx_total = now.rx, .tx_total = now.tx };
+    };
+    const dt_ms = now.ts_ms - prev.ts_ms;
+    var rx_rate: f64 = 0;
+    var tx_rate: f64 = 0;
+    if (dt_ms > 0) {
+        const dt_s: f64 = @as(f64, @floatFromInt(dt_ms)) / 1000.0;
+        if (now.rx >= prev.rx) rx_rate = @as(f64, @floatFromInt(now.rx - prev.rx)) / dt_s;
+        if (now.tx >= prev.tx) tx_rate = @as(f64, @floatFromInt(now.tx - prev.tx)) / dt_s;
+    }
+    return .{ .rx_bytes_per_sec = rx_rate, .tx_bytes_per_sec = tx_rate, .rx_total = now.rx, .tx_total = now.tx };
+}
+
 // ── JSON helpers (just enough for our wire shape) ─────────────────────
 //
 // zig 0.16 ArrayList is unmanaged; the allocator is passed per-call. Helpers
@@ -329,6 +416,14 @@ fn writeDiskJson(buf: *Buf, alloc: std.mem.Allocator, s: DiskSample) !void {
     try buf.print(alloc, "{{\"used_bytes\":{d},\"total_bytes\":{d},\"free_bytes\":{d},\"used_pct\":", .{ s.used_bytes, s.total_bytes, s.free_bytes });
     try jsonNumber(buf, alloc, s.used_pct);
     try buf.append(alloc, '}');
+}
+
+fn writeNetJson(buf: *Buf, alloc: std.mem.Allocator, s: NetSample) !void {
+    try buf.appendSlice(alloc, "{\"rx_bytes_per_sec\":");
+    try jsonNumber(buf, alloc, s.rx_bytes_per_sec);
+    try buf.appendSlice(alloc, ",\"tx_bytes_per_sec\":");
+    try jsonNumber(buf, alloc, s.tx_bytes_per_sec);
+    try buf.print(alloc, ",\"rx_total\":{d},\"tx_total\":{d}}}", .{ s.rx_total, s.tx_total });
 }
 
 // ── battery + GPU via IOKit / CoreFoundation (macOS) ──────────────────────
@@ -688,7 +783,11 @@ fn buildToolResult(
         try writeTempJson(&out, arena, tempSample());
         try out.appendSlice(arena, ",\"fan\":");
         try writeFanJson(&out, arena, fanSample());
+        try out.appendSlice(arena, ",\"network\":");
+        try writeNetJson(&out, arena, netSample());
         try out.append(arena, '}');
+    } else if (std.mem.eql(u8, tool, "sysmon.network")) {
+        try writeNetJson(&out, arena, netSample());
     } else if (std.mem.eql(u8, tool, "sysmon.cpu")) {
         try writeCpuJson(&out, arena, cpuSample());
     } else if (std.mem.eql(u8, tool, "sysmon.memory")) {
