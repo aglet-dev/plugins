@@ -127,6 +127,5 @@
         "wasi_snapshot_preview1.clock_time_get"
       ]
     }
-  },
-  "ui": { "type": "Page" }
+  }
 }

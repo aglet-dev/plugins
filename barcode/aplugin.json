@@ -81,8 +81,5 @@
         "wasi_snapshot_preview1.fd_seek"
       ]
     }
-  },
-  "ui": {
-    "type": "Page"
   }
 }

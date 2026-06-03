@@ -47,6 +47,5 @@
       "watch": ["src/**", "aplugin.json"],
       "artifact": "dist/tokstat"
     }
-  },
-  "ui": { "type": "Page" }
+  }
 }
