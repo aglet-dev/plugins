@@ -1,0 +1,131 @@
+{
+  "manifest": {
+    "id": "crypto",
+    "name": "Crypto",
+    "version": "0.1.0",
+    "plugin": true,
+    "namespace": "crypto",
+    "description": {
+      "default": "Modern cryptography via libsodium: hash, hmac, KDF, symmetric encrypt, Ed25519 sign, secure random.",
+      "zh": "libsodium 现代密码学：hash / hmac / KDF / 对称加密 / Ed25519 签名 / 强随机。",
+      "ja": "libsodium のモダン暗号：ハッシュ / HMAC / KDF / 共通鍵暗号 / Ed25519 署名 / 強乱数。"
+    },
+    "keywords": ["crypto", "libsodium", "hash", "encrypt", "sign", "kdf", "totp"],
+    "license": "MIT",
+    "homepage": "https://github.com/aglet-dev/plugins",
+    "actions": [
+      {
+        "name": "hash",
+        "params": [
+          { "key": "algo",    "type": "string" },
+          { "key": "data_b64","type": "string" }
+        ],
+        "result": [{ "key": "digest_b64", "type": "string" }],
+        "permission": "crypto:hash"
+      },
+      {
+        "name": "hmac",
+        "params": [
+          { "key": "algo",     "type": "string" },
+          { "key": "key_b64",  "type": "string" },
+          { "key": "data_b64", "type": "string" }
+        ],
+        "result": [{ "key": "mac_b64", "type": "string" }],
+        "permission": "crypto:hash"
+      },
+      {
+        "name": "kdf",
+        "params": [
+          { "key": "password",  "type": "string" },
+          { "key": "salt_b64",  "type": "string" },
+          { "key": "opslimit",  "type": "integer" },
+          { "key": "memlimit",  "type": "integer" },
+          { "key": "key_bytes", "type": "integer" }
+        ],
+        "result": [{ "key": "key_b64", "type": "string" }],
+        "permission": "crypto:kdf"
+      },
+      {
+        "name": "encrypt",
+        "params": [
+          { "key": "key_b64",       "type": "string" },
+          { "key": "plaintext_b64", "type": "string" },
+          { "key": "ad_b64",        "type": "string" }
+        ],
+        "result": [
+          { "key": "ciphertext_b64", "type": "string" },
+          { "key": "nonce_b64",      "type": "string" }
+        ],
+        "permission": "crypto:encrypt"
+      },
+      {
+        "name": "decrypt",
+        "params": [
+          { "key": "key_b64",        "type": "string" },
+          { "key": "ciphertext_b64", "type": "string" },
+          { "key": "nonce_b64",      "type": "string" },
+          { "key": "ad_b64",         "type": "string" }
+        ],
+        "result": [{ "key": "plaintext_b64", "type": "string" }],
+        "permission": "crypto:encrypt"
+      },
+      {
+        "name": "keypair",
+        "params": [],
+        "result": [
+          { "key": "pub_b64", "type": "string" },
+          { "key": "sec_b64", "type": "string" }
+        ],
+        "permission": "crypto:sign"
+      },
+      {
+        "name": "sign",
+        "params": [
+          { "key": "sec_b64",  "type": "string" },
+          { "key": "data_b64", "type": "string" }
+        ],
+        "result": [{ "key": "sig_b64", "type": "string" }],
+        "permission": "crypto:sign"
+      },
+      {
+        "name": "verify",
+        "params": [
+          { "key": "pub_b64",  "type": "string" },
+          { "key": "data_b64", "type": "string" },
+          { "key": "sig_b64",  "type": "string" }
+        ],
+        "result": [{ "key": "ok", "type": "boolean" }],
+        "permission": "crypto:sign"
+      },
+      {
+        "name": "random",
+        "params": [{ "key": "n", "type": "integer" }],
+        "result": [{ "key": "bytes_b64", "type": "string" }],
+        "permission": "crypto:random"
+      },
+      {
+        "name": "totp",
+        "params": [
+          { "key": "secret_b32",   "type": "string" },
+          { "key": "unix_seconds", "type": "integer" },
+          { "key": "algo",         "type": "string" },
+          { "key": "digits",       "type": "integer" },
+          { "key": "period",       "type": "integer" }
+        ],
+        "result": [
+          { "key": "code",      "type": "string" },
+          { "key": "remaining", "type": "integer" }
+        ],
+        "permission": "crypto:totp"
+      }
+    ],
+    "backend": {
+      "kind": "wasm",
+      "path": "dist/crypto.wasm",
+      "wasi_imports": [
+        "wasi_snapshot_preview1.random_get",
+        "wasi_snapshot_preview1.clock_time_get"
+      ]
+    }
+  }
+}

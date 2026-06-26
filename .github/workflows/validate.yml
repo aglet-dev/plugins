@@ -1,0 +1,117 @@
+name: Validate
+
+on:
+  pull_request:
+    paths:
+      - "**/*.zig"
+      - "**/*.cpp"
+      - "**/*.h"
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/CMakeLists.txt"
+      - "**/aplugin.json"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/validate.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wasm
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git diff against the PR base / previous push
+
+      # On-demand: only build the plugins whose sources changed, and only
+      # install the toolchains those plugins actually need. A one-file edit
+      # to a pure-zig plugin (tokstat/sysmon/crypto) no longer drags the whole
+      # ZXing/libarchive/comrak world + emscripten/rust install behind it.
+      #
+      # Toolchain by build method (see build.zig):
+      #   cmake (emscripten): barcode image archive
+      #   rust  (cargo):      highlight markdown
+      #   zig only:           crypto sysmon tokstat
+      - name: Detect changed plugins
+        id: detect
+        run: |
+          set -euo pipefail
+          CMAKE_PLUGINS="barcode image archive"
+          RUST_PLUGINS="highlight markdown"
+          ZIG_PLUGINS="crypto sysmon tokstat"
+          ALL="$CMAKE_PLUGINS $RUST_PLUGINS $ZIG_PLUGINS"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+
+          if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
+            changed=$(git ls-files)
+          else
+            changed=$(git diff --name-only "$base" "$head")
+          fi
+
+          # Shared infra / SDK change → conservative full build (affects every plugin).
+          if echo "$changed" | grep -qE '^(build\.zig|build\.zig\.zon|sdk/|\.github/workflows/validate\.yml$)'; then
+            targets="$ALL"
+            echo "Full build (shared infra/SDK changed)."
+          else
+            dirs=$(echo "$changed" | awk -F/ 'NF>=2 { print $1 }' | sort -u)
+            targets=""
+            for d in $dirs; do
+              for p in $ALL; do
+                [ "$d" = "$p" ] && targets="$targets $p"
+              done
+            done
+          fi
+          targets=$(echo $targets | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs || true)
+
+          need_em=0; need_rust=0
+          for p in $targets; do
+            for c in $CMAKE_PLUGINS; do [ "$p" = "$c" ] && need_em=1; done
+            for r in $RUST_PLUGINS; do [ "$p" = "$r" ] && need_rust=1; done
+          done
+
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "need_emscripten=$need_em" >> "$GITHUB_OUTPUT"
+          echo "need_rust=$need_rust" >> "$GITHUB_OUTPUT"
+          echo "Plugins to build: ${targets:-<none>}  (emscripten=$need_em rust=$need_rust)"
+
+      - uses: mlugg/setup-zig@v2
+        if: steps.detect.outputs.targets != ''
+        with:
+          version: 0.16.0
+
+      # Rust plugins (highlight/markdown): cargo→wasm32-wasip1; C deps via zig cc.
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.detect.outputs.targets != '' && steps.detect.outputs.need_rust == '1'
+        with:
+          targets: wasm32-wasip1
+
+      - name: Install emscripten
+        if: steps.detect.outputs.targets != '' && steps.detect.outputs.need_emscripten == '1'
+        run: brew install emscripten
+
+      - name: Build changed plugins
+        if: steps.detect.outputs.targets != ''
+        run: |
+          set -euo pipefail
+          for p in ${{ steps.detect.outputs.targets }}; do
+            echo "::group::zig build $p"
+            zig build "$p"
+            echo "::endgroup::"
+          done
+
+      - name: Nothing to build
+        if: steps.detect.outputs.targets == ''
+        run: echo "No plugin sources changed — skipping build."

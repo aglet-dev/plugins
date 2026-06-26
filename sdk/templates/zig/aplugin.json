@@ -1,0 +1,29 @@
+{
+  "manifest": {
+    "id": "{{id}}",
+    "name": "{{Id}}",
+    "version": "0.1.0",
+    "plugin": true,
+    "namespace": "{{namespace}}",
+    "description": "{{description}}",
+    "license": "MIT",
+    "actions": [
+      {
+        "name": "echo",
+        "params": [
+          { "key": "msg", "type": "string" }
+        ],
+        "result": [
+          { "key": "echo", "type": "string" }
+        ],
+        "permission": "{{namespace}}:read"
+      }
+    ],
+    "backend": {
+      "kind": "wasm",
+      "path": "dist/{{id}}.wasm",
+      "wasi_imports": []
+    }
+  },
+  "ui": { "type": "Page" }
+}

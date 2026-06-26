@@ -1,0 +1,9 @@
+[package]
+name = "aglet_plugin_sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Aglet wasm plugin SDK (Rust) — alloc/free/dispatch ABI + JSON envelopes"
+
+[lib]
+crate-type = ["rlib"]

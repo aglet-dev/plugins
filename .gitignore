@@ -1,0 +1,6 @@
+.DS_Store
+.zig-cache/
+*/build/
+*/dist/
+zig-out/
+zig-pkg/

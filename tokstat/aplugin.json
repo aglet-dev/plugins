@@ -1,0 +1,51 @@
+{
+  "manifest": {
+    "id": "tokstat",
+    "name": "Token Usage Stats",
+    "version": "0.1.0",
+    "plugin": true,
+    "namespace": "tokstat",
+    "description": {
+      "default": "AI coding token-usage probe. Claude: PTY-spawns `claude /usage` per probe. Codex: HTTP GET `chatgpt.com/backend-api/wham/usage` with the OAuth access_token from `~/.codex/auth.json` (extra: plan_type, credits), with `~/.codex/sessions/.../rollout-*.jsonl` tail-scan as offline fallback when the API call fails. Stdio MCP plugin or standalone `--jsonl` CLI.",
+      "zh": "AI 编程 token 用量探针。Claude 走 PTY 跑 `claude /usage` 解面板；Codex 优先 HTTP 调 `chatgpt.com/backend-api/wham/usage` (Bearer token 来自 ~/.codex/auth.json，附带 plan_type + credits)，HTTP 失败时退化到读 ~/.codex/sessions 下最新 rollout JSONL。可作 stdio MCP plugin 或 `--jsonl` 独立 CLI 跑。",
+      "ja": "AI コーディングのトークン使用量プローブ。Claude は PTY 上で `claude /usage` を実行してパネル解析。Codex は `~/.codex/auth.json` の OAuth access_token を使って `chatgpt.com/backend-api/wham/usage` を HTTP GET（plan_type / credits も得る）。HTTP 失敗時は ~/.codex/sessions の最新 rollout JSONL にフォールバック。"
+    },
+    "license": "MIT",
+    "keywords": ["claude", "codex", "usage", "tokens", "session", "weekly"],
+    "homepage": "https://github.com/aglet-dev/plugins",
+    "actions": [
+      {
+        "name": "snapshot",
+        "params": [],
+        "result": [
+          { "key": "claude", "type": "object" },
+          { "key": "codex", "type": "object" }
+        ]
+      },
+      {
+        "name": "refresh",
+        "params": [],
+        "result": [
+          { "key": "claude", "type": "object" },
+          { "key": "codex", "type": "object" }
+        ]
+      }
+    ],
+    "backend": {
+      "kind": "stdio",
+      "path": "dist/tokstat",
+      "targets": ["darwin-arm64"],
+      "capabilities": [
+        "exec:fork",
+        "fs:read:any",
+        "net:tcp:out"
+      ],
+      "emits": ["sample"]
+    },
+    "dev": {
+      "build": { "cmd": ["zig", "build", "tokstat"], "cwd": ".." },
+      "watch": ["src/**", "aplugin.json"],
+      "artifact": "dist/tokstat"
+    }
+  }
+}

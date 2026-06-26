@@ -1,0 +1,73 @@
+name: Publish
+
+# Trigger: tag `<plugin>-v<version>` or manual dispatch.
+# Builds wasm and opens a PR to aglet-dev/registry.
+
+on:
+  push:
+    tags:
+      - '*-v*'
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: 'Plugin id'
+        required: true
+      version:
+        description: 'Version'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Rust 插件（highlight 等）走 cargo→wasm32-wasip1（C 依赖经 zig cc）。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Resolve target
+        id: target
+        run: |
+          set -e
+          if [ -n "${{ github.event.inputs.plugin }}" ]; then
+            PLUGIN="${{ github.event.inputs.plugin }}"
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            PLUGIN="${TAG%-v*}"
+            VERSION="${TAG##*-v}"
+          fi
+          [ -f "$PLUGIN/aplugin.json" ] || { echo "✗ $PLUGIN/aplugin.json missing"; exit 1; }
+          MANIFEST_VER=$(jq -r .manifest.version "$PLUGIN/aplugin.json")
+          if [ "$MANIFEST_VER" != "$VERSION" ]; then
+            echo "✗ tag $VERSION ≠ manifest.version $MANIFEST_VER"; exit 1
+          fi
+          echo "plugin=$PLUGIN"   >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install
+        run: |
+          brew tap aglet-dev/tap
+          brew install aglet-dev/tap/aglet emscripten
+
+      - name: Build
+        run: zig build ${{ steps.target.outputs.plugin }}
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: |
+          set -e
+          gh auth setup-git
+          export AGLET_REGISTRY_URL="https://github.com/aglet-dev/registry.git"
+          aglet plugin publish "${{ steps.target.outputs.plugin }}/aplugin.json"
