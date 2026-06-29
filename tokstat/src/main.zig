@@ -408,15 +408,17 @@ fn probeClaudeInner(arena: std.mem.Allocator) !Probe {
                 usage_sent = true;
             }
         }
-        // Stop early once the panel has rendered and settled briefly.
+        // Stop early once the panel's **percent value** has rendered and settled.
+        // 关键:gate 在 "%used"(真正要解析的数字)出现,而不是 "Current session"
+        // 标签 —— claude 慢渲染/限流时标签先出、百分比晚出,只等标签会截到没数字的
+        // 半成品 → panel-not-recognized。等数字出现再 settle，确保 session+week 都渲染好。
         if (usage_sent) {
             if (panel_first_seen_ms == null and
-                (std.mem.indexOf(u8, buf.items, "Current session") != null or
-                    std.mem.indexOf(u8, buf.items, "Current week") != null))
+                std.mem.indexOf(u8, buf.items, "%used") != null)
             {
                 panel_first_seen_ms = nowMs();
             }
-            if (panel_first_seen_ms) |t| if (nowMs() - t > 800) break;
+            if (panel_first_seen_ms) |t| if (nowMs() - t > 1000) break;
         }
     }
 
@@ -544,8 +546,10 @@ fn parsePanel(arena: std.mem.Allocator, stripped: []u8) !Probe {
         search_blob = stripped[u_idx..];
     }
 
-    const session_end = std.mem.indexOf(u8, search_blob, "Current week") orelse search_blob.len;
-    if (std.mem.indexOf(u8, search_blob, "Current session")) |s_idx| {
+    // 用 lastIndexOf 锚**最后一帧**:PTY buf 累积了多次重绘,早期帧可能标签已出但
+    // 百分比未渲染(切片到那帧 → 抽不到 %)。最后一帧最完整。
+    if (std.mem.lastIndexOf(u8, search_blob, "Current session")) |s_idx| {
+        const session_end = std.mem.indexOfPos(u8, search_blob, s_idx, "Current week") orelse search_blob.len;
         const slice = search_blob[s_idx..session_end];
         const v = extractPanelValues(slice);
         p.session_pct = v.pct;
@@ -555,13 +559,13 @@ fn parsePanel(arena: std.mem.Allocator, stripped: []u8) !Probe {
         }
     }
 
-    // Prefer the "(all models)" panel; fall back to bare "Current week".
+    // Prefer the "(all models)" panel; fall back to bare "Current week"。同样取最后一帧。
     var weekly_slice_opt: ?[]const u8 = null;
-    if (std.mem.indexOf(u8, search_blob, "Current week (all models)")) |w_idx| {
+    if (std.mem.lastIndexOf(u8, search_blob, "Current week (all models)")) |w_idx| {
         var end = search_blob.len;
         if (std.mem.indexOfPos(u8, search_blob, w_idx + 25, "Current week (")) |w2| end = w2;
         weekly_slice_opt = search_blob[w_idx..end];
-    } else if (std.mem.indexOf(u8, search_blob, "Current week")) |w_idx| {
+    } else if (std.mem.lastIndexOf(u8, search_blob, "Current week")) |w_idx| {
         weekly_slice_opt = search_blob[w_idx..];
     }
     if (weekly_slice_opt) |slice| {
