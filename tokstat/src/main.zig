@@ -212,9 +212,18 @@ const Probe = struct {
 };
 
 fn probeClaude(arena: std.mem.Allocator) Probe {
-    tlog("claude: probe start", .{});
+    tlog("claude: probe start (try HTTP first)", .{});
+    // HTTP 优先:Claude Code 的 OAuth token(Keychain)直调 api.anthropic.com/api/oauth/usage
+    // —— 永远新、不依赖 PTY 抓屏(脆),拿干净 JSON(five_hour/seven_day utilization + ISO resets_at)。
+    // 与 codex 的 HTTP-优先/JSONL-兜底对称。失败(无 token / 401 过期 / 网断)→ PTY 抓屏兜底。
+    if (probeClaudeHttp(arena)) |p| {
+        tlog("claude: http ok session={?d}% weekly={?d}%", .{ p.session_pct, p.weekly_pct });
+        return p;
+    } else |e| {
+        tlog("claude: http ERR={s}, fallback PTY", .{@errorName(e)});
+    }
     const p = probeClaudeInner(arena) catch |e| {
-        tlog("claude: ERR={s}", .{@errorName(e)});
+        tlog("claude: pty ERR={s}", .{@errorName(e)});
         return .{
             .ok = false,
             .err = @errorName(e),
@@ -228,8 +237,93 @@ fn probeClaude(arena: std.mem.Allocator) Probe {
             .raw_panel = null,
         };
     };
-    tlog("claude: ok session={?d}% weekly={?d}%", .{ p.session_pct, p.weekly_pct });
+    tlog("claude: pty ok session={?d}% weekly={?d}%", .{ p.session_pct, p.weekly_pct });
     return p;
+}
+
+/// HTTP 路径:从 macOS Keychain 取 Claude Code 的 OAuth access token,
+/// curl `https://api.anthropic.com/api/oauth/usage`(Bearer)。任意失败 → 抛错让
+/// caller 回退 PTY。注:首次从非-Claude-Code 进程读该 Keychain 项可能弹一次授权
+/// (之后可「始终允许」);codex 的 ~/.codex/auth.json 是明文无此问题。
+fn probeClaudeHttp(arena: std.mem.Allocator) !Probe {
+    // 1) Keychain → {"claudeAiOauth":{"accessToken":...}}
+    const kc = try spawnCaptureStdout(arena, &.{
+        "/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-w",
+    });
+    var kparsed = std.json.parseFromSlice(std.json.Value, arena, std.mem.trim(u8, kc, " \t\r\n"), .{}) catch return error.KcParse;
+    defer kparsed.deinit();
+    const kroot = switch (kparsed.value) { .object => |o| o, else => return error.KcShape };
+    const oauth = switch (kroot.get("claudeAiOauth") orelse return error.KcNoOauth) {
+        .object => |o| o, else => return error.KcShape,
+    };
+    const access_tok = switch (oauth.get("accessToken") orelse return error.KcNoToken) {
+        .string => |s| s, else => return error.KcShape,
+    };
+
+    // 2) curl /api/oauth/usage
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(arena);
+    try args.append(arena, "/usr/bin/curl");
+    try args.append(arena, "-sS");
+    try args.append(arena, "--max-time");
+    try args.append(arena, "8");
+    try args.append(arena, "-H");
+    try args.append(arena, try std.fmt.allocPrint(arena, "Authorization: Bearer {s}", .{access_tok}));
+    try args.append(arena, "-H");
+    try args.append(arena, "Accept: application/json");
+    try args.append(arena, "-H");
+    try args.append(arena, "User-Agent: tokstat");
+    try args.append(arena, "https://api.anthropic.com/api/oauth/usage");
+    const body = try spawnCaptureStdout(arena, args.items);
+
+    // 3) parse {five_hour:{utilization,resets_at}, seven_day:{...}}
+    var uparsed = std.json.parseFromSlice(std.json.Value, arena, body, .{}) catch return error.UsageParse;
+    defer uparsed.deinit();
+    const uroot = switch (uparsed.value) { .object => |o| o, else => return error.UsageShape };
+
+    var p: Probe = .{
+        .ok = false, .err = null,
+        .session_pct = null, .session_resets = null, .session_resets_ms = null,
+        .weekly_pct = null, .weekly_resets = null, .weekly_resets_ms = null,
+        .total_cost_usd = null, .raw_panel = null,
+    };
+    fillWindow(arena, uroot, "five_hour", &p.session_pct, &p.session_resets, &p.session_resets_ms);
+    fillWindow(arena, uroot, "seven_day", &p.weekly_pct, &p.weekly_resets, &p.weekly_resets_ms);
+    p.ok = p.session_pct != null or p.weekly_pct != null;
+    if (!p.ok) return error.UsageEmpty; // 让 caller 回退 PTY
+    return p;
+}
+
+/// 从 usage JSON 的某个 window(five_hour / seven_day)抽 utilization(%) + resets_at(ISO)。
+fn fillWindow(arena: std.mem.Allocator, root: std.json.ObjectMap, key: []const u8, pct: *?u32, resets: *?[]const u8, resets_ms: *?i64) void {
+    const w = switch (root.get(key) orelse return) { .object => |o| o, else => return };
+    if (w.get("utilization")) |uv| {
+        const f: ?f64 = switch (uv) { .float => |x| x, .integer => |i| @floatFromInt(i), else => null };
+        if (f) |x| pct.* = @intFromFloat(@round(x));
+    }
+    if (w.get("resets_at")) |rv| if (rv == .string) {
+        resets.* = arena.dupe(u8, rv.string) catch null;
+        resets_ms.* = parseIsoUtcMs(rv.string);
+    };
+}
+
+/// ISO-8601 UTC("2026-06-29T10:30:00.257936+00:00")→ epoch ms。resets_at 恒为 +00:00。
+/// 用 Hinnant days_from_civil 算,不依赖 libc mktime(那个是本地时区)。
+fn parseIsoUtcMs(s: []const u8) ?i64 {
+    if (s.len < 19 or s[4] != '-' or s[10] != 'T') return null;
+    const y = std.fmt.parseInt(i64, s[0..4], 10) catch return null;
+    const mo = std.fmt.parseInt(i64, s[5..7], 10) catch return null;
+    const d = std.fmt.parseInt(i64, s[8..10], 10) catch return null;
+    const h = std.fmt.parseInt(i64, s[11..13], 10) catch return null;
+    const mi = std.fmt.parseInt(i64, s[14..16], 10) catch return null;
+    const se = std.fmt.parseInt(i64, s[17..19], 10) catch return null;
+    const yy = y - @as(i64, if (mo <= 2) 1 else 0);
+    const era = @divFloor(if (yy >= 0) yy else yy - 399, 400);
+    const yoe = yy - era * 400;
+    const doy = @divFloor(153 * (mo + @as(i64, if (mo > 2) -3 else 9)) + 2, 5) + d - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    const days = era * 146097 + doe - 719468;
+    return (days * 86400 + h * 3600 + mi * 60 + se) * 1000;
 }
 
 fn findTrustedDir(arena: std.mem.Allocator) ?[:0]const u8 {
