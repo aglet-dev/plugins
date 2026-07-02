@@ -63,11 +63,17 @@ git push --tags
 | `image` | image | metadata, decode, encode, process | [libwebp](https://github.com/webmproject/libwebp) + [stb](https://github.com/nothings/stb) |
 | `markdown` | markdown | render | Markdown → canonical UI IR |
 | `highlight` | highlight | highlight | syntax highlighting (Rust) |
-| `tokstat` | tokstat | snapshot, refresh | Claude + Codex token usage — **stdio native** (darwin) |
+| `aicreds` | aicreds | read | Live OAuth token for Claude Code / Codex — **stdio native** (darwin) |
 
-`tokstat` is a native **stdio** plugin (per-platform binary, macOS), shipped with the
-`tokstat` app. The wasm plugins above publish to the registry when an app that needs
-them ships. `sysmon` (stdio, macOS) is deferred to a later release.
+`aicreds` is a read-only native **stdio** plugin (per-platform binary, macOS). It reads
+the auto-refreshed OAuth access token that local AI coding tools keep in the OS keystore
+(Claude Code's `Claude Code-credentials` Keychain item; Codex's `~/.codex/auth.json`) and
+hands it to a consuming aglet — which then calls the provider usage APIs itself. Reading
+another app's credentials is an OS-privileged operation a sandboxed aglet can't do, so it
+lives in a small, single-purpose plugin. It makes no network calls of its own. Ships with
+the `tokstat` app. (Supersedes the old `tokstat` plugin, which bundled the HTTP/PTY probes;
+those moved into the app.) The wasm plugins above publish to the registry when an app that
+needs them ships. `sysmon` (stdio, macOS) is deferred to a later release.
 
 ## License
 

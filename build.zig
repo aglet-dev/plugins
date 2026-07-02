@@ -42,8 +42,10 @@ pub fn build(b: *std.Build) void {
     all.dependOn(addRustPlugin(b, "markdown")); // comrak → IR node 树（pure Rust，无 C）
 
     // ── stdio native 插件(per-platform 二进制)─────────────────────────────
-    // tokstat 随 tokstat app 0.1.0 发布(darwin)。sysmon 待后续。
-    all.dependOn(addStdioNativePlugin(b, "tokstat"));
+    // aicreds:只读凭据插件(读 Claude Keychain / codex auth.json),供 tokstat app
+    // 自己发用量 HTTP。取代旧 tokstat 插件(HTTP+PTY+JSONL 一体)——用量探测已
+    // 迁进 tokstat app 的 scripts.js。sysmon 待后续。
+    all.dependOn(addStdioNativePlugin(b, "aicreds"));
 }
 
 const CmakeDep = struct {

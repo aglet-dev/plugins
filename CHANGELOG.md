@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Add `aicreds`** (stdio, darwin) — a read-only credential reader: returns the
+  live OAuth access token for Claude Code (`Claude Code-credentials` Keychain) and
+  Codex (`~/.codex/auth.json`). Single action `read({provider})`. Makes no network
+  calls of its own.
+- **Remove `tokstat`** — its Claude/Codex usage probing (HTTP + the slow PTY/JSONL
+  fallbacks) moved into the `tokstat` app's `scripts.js`, which now calls the usage
+  APIs directly using a token from `aicreds`. Only the OS-privileged credential read
+  stays in a plugin. The already-published `tokstat` plugin versions remain in the
+  registry (immutable) but are deprecated and no longer referenced by any app.
+
 ## 0.1.0
 
 Inaugural public release. 7 plugins — 6 WebAssembly (sandboxed, cross-platform)
