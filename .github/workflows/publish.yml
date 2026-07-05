@@ -1,7 +1,20 @@
 name: Publish
 
-# Trigger: tag `<plugin>-v<version>` or manual dispatch.
-# Builds wasm and opens a PR to aglet-dev/registry.
+# 触发：tag `<plugin>-v<version>` 或手动 dispatch。构建插件二进制 → 开 PR 到 aglet-dev/registry。
+#
+# 两条路径（按插件是否声明 windows 目标自动选）：
+#   - wasm / 纯 host 插件（无 windows 目标）：全程 macos（GitHub-hosted），沿用旧流程。
+#   - stdio 插件带 windows 目标：macos 建 darwin + 交叉编 windows 二进制 → 上传 →
+#     在**自托管 Windows runner(标签 windows-signing)**上做代码签名 + 发布。
+#     未签名的 Windows 可执行文件在用户机会被杀软实时扫描阻塞启动，故 windows 二进制
+#     必须签名后再发布（`aglet plugin publish` 对未签名 windows 目标会拒绝）。
+#
+# 自托管 Windows runner(windows-signing)的前置条件（由 runner 环境提供，非本 workflow 装）：
+#   - `aglet` CLI 在 PATH。
+#   - 代码签名工具 + 证书：C:\signing\evsign.exe（密钥经 EVSIGN_KEY/EVSIGN_PWD secrets 注入）。
+#   - 签名封装脚本：C:\signing\sign.ps1。
+#   - git + gh（PUBLISH_TOKEN 认证）。
+# Secrets：PUBLISH_TOKEN（写 aglet-dev/registry 的 PR）、EVSIGN_KEY、EVSIGN_PWD。
 
 on:
   push:
@@ -20,54 +33,116 @@ permissions:
   contents: read
 
 jobs:
-  publish:
-    name: Publish
-    runs-on: macos-26
+  # ── 解析 plugin/version + 判断是否需要 windows 签名(据 backend.targets) ──────────
+  resolve:
+    name: Resolve
+    runs-on: ubuntu-latest
+    outputs:
+      plugin: ${{ steps.r.outputs.plugin }}
+      version: ${{ steps.r.outputs.version }}
+      has_windows: ${{ steps.r.outputs.has_windows }}
+      publish_runner: ${{ steps.r.outputs.publish_runner }}
     steps:
       - uses: actions/checkout@v4
-
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      # Rust 插件（highlight 等）走 cargo→wasm32-wasip1（C 依赖经 zig cc）。
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Resolve target
-        id: target
+      - id: r
         run: |
           set -e
           if [ -n "${{ github.event.inputs.plugin }}" ]; then
-            PLUGIN="${{ github.event.inputs.plugin }}"
-            VERSION="${{ github.event.inputs.version }}"
+            PLUGIN="${{ github.event.inputs.plugin }}"; VERSION="${{ github.event.inputs.version }}"
           else
-            TAG="${GITHUB_REF#refs/tags/}"
-            PLUGIN="${TAG%-v*}"
-            VERSION="${TAG##*-v}"
+            TAG="${GITHUB_REF#refs/tags/}"; PLUGIN="${TAG%-v*}"; VERSION="${TAG##*-v}"
           fi
           [ -f "$PLUGIN/aplugin.json" ] || { echo "✗ $PLUGIN/aplugin.json missing"; exit 1; }
           MANIFEST_VER=$(jq -r .manifest.version "$PLUGIN/aplugin.json")
-          if [ "$MANIFEST_VER" != "$VERSION" ]; then
-            echo "✗ tag $VERSION ≠ manifest.version $MANIFEST_VER"; exit 1
+          [ "$MANIFEST_VER" = "$VERSION" ] || { echo "✗ tag $VERSION ≠ manifest.version $MANIFEST_VER"; exit 1; }
+          # backend.targets[] 里有 windows-* → 需签名 runner 发布;否则(wasm/纯 host) macos 发布。
+          HAS_WIN=$(jq -r '[.manifest.backend.targets // [] | .[] | select(startswith("windows"))] | length > 0' "$PLUGIN/aplugin.json")
+          if [ "$HAS_WIN" = "true" ]; then
+            RUNNER='["self-hosted","windows-signing"]'
+          else
+            RUNNER='"macos-26"'
           fi
-          echo "plugin=$PLUGIN"   >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "plugin=$PLUGIN"; echo "version=$VERSION"
+            echo "has_windows=$HAS_WIN"; echo "publish_runner=$RUNNER"
+          } >> "$GITHUB_OUTPUT"
+          echo "plugin=$PLUGIN version=$VERSION has_windows=$HAS_WIN runner=$RUNNER"
 
-      - name: Install
+  # ── 在 macos 建所有 per-target 二进制(darwin host + 交叉编 windows) ────────────
+  build:
+    name: Build binaries
+    needs: resolve
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # Rust 插件(highlight 等)走 cargo→wasm32-wasip1(C 依赖经 zig cc)。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Install emscripten (CMake wasm 插件用；stdio/纯 zig 无害)
+        run: brew install emscripten || true
+      - name: Build host / wasm binary
+        # 纯 zig/rust/wasm 插件此步即产物;stdio 插件此步出 darwin host 二进制。
+        run: zig build ${{ needs.resolve.outputs.plugin }}
+      - name: Build windows binary (stdio 带 windows 目标)
+        if: needs.resolve.outputs.has_windows == 'true'
+        # Zig 交叉编 windows(mingw,无需 SDK);产物 dist/<id>-windows-x86_64.exe(未签名)。
+        run: zig build ${{ needs.resolve.outputs.plugin }}-windows-x86_64
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ needs.resolve.outputs.plugin }}
+          path: ${{ needs.resolve.outputs.plugin }}/dist/**
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── 发布:有 windows→签名 runner;否则→macos。都开 PR 到 registry ────────────────
+  publish:
+    name: Sign & publish
+    needs: [resolve, build]
+    runs-on: ${{ fromJSON(needs.resolve.outputs.publish_runner) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ needs.resolve.outputs.plugin }}
+          path: ${{ needs.resolve.outputs.plugin }}/dist
+      # macos 路径:brew 装 aglet CLI。签名 runner:aglet 已在 PATH(runner 前置)。
+      - name: Install aglet CLI (macOS)
+        if: needs.resolve.outputs.has_windows != 'true'
         run: |
           brew tap aglet-dev/tap
-          brew install aglet-dev/tap/aglet emscripten
-
-      - name: Build
-        run: zig build ${{ steps.target.outputs.plugin }}
-
-      - name: Publish
+          brew install aglet-dev/tap/aglet
+      - name: Verify aglet CLI (signing runner)
+        if: needs.resolve.outputs.has_windows == 'true'
+        shell: pwsh
+        run: aglet --version   # 缺则 runner 未装 aglet.exe(见 workflow 头部前置说明)
+      # ── 发布(macOS:无 windows,不签) ──────────────────────────────────────────
+      - name: Publish (macOS, no signing)
+        if: needs.resolve.outputs.has_windows != 'true'
         env:
           GH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
         run: |
           set -e
           gh auth setup-git
           export AGLET_REGISTRY_URL="https://github.com/aglet-dev/registry.git"
-          aglet plugin publish "${{ steps.target.outputs.plugin }}/aplugin.json"
+          aglet plugin publish "${{ needs.resolve.outputs.plugin }}/aplugin.json"
+      # ── 发布(签名 runner:evsign 签 windows 二进制 + publish + PR) ─────────────
+      - name: Publish (signing runner, EV-sign windows)
+        if: needs.resolve.outputs.has_windows == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          EVSIGN_EXE: C:\signing\evsign.exe
+          EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
+          EVSIGN_PWD: ${{ secrets.EVSIGN_PWD }}
+          AGLET_REGISTRY_URL: https://github.com/aglet-dev/registry.git
+        run: |
+          gh auth setup-git
+          # --sign-template:对每个 windows per-target 二进制在算 sha 前 evsign(见 sign.ps1)。
+          $sign = 'pwsh -NoProfile -ExecutionPolicy Bypass -File C:\signing\sign.ps1 {{file}}'
+          aglet plugin publish "${{ needs.resolve.outputs.plugin }}/aplugin.json" --sign-template $sign
