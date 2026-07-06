@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Add `xml`** (wasm) — a pure Rust XML utility plugin. `xml.parse` returns a
+  lightweight element tree; `xml.rss` normalizes RSS 2.0 and Atom feeds into
+  feed metadata plus item arrays for reader-style aglets.
 - **Add `aicreds`** (stdio, darwin) — a read-only credential reader: returns the
   live OAuth access token for Claude Code (`Claude Code-credentials` Keychain) and
   Codex (`~/.codex/auth.json`). Single action `read({provider})`. Makes no network

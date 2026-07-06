@@ -31,20 +31,20 @@ jobs:
 
       # On-demand: only build the plugins whose sources changed, and only
       # install the toolchains those plugins actually need. A one-file edit
-      # to a pure-zig plugin (tokstat/sysmon/crypto) no longer drags the whole
+      # to a pure-zig plugin (crypto) no longer drags the whole
       # ZXing/libarchive/comrak world + emscripten/rust install behind it.
       #
       # Toolchain by build method (see build.zig):
       #   cmake (emscripten): barcode image archive
-      #   rust  (cargo):      highlight markdown
-      #   zig only:           crypto sysmon tokstat
+      #   rust  (cargo):      highlight markdown xml
+      #   zig only:           crypto
       - name: Detect changed plugins
         id: detect
         run: |
           set -euo pipefail
           CMAKE_PLUGINS="barcode image archive"
-          RUST_PLUGINS="highlight markdown"
-          ZIG_PLUGINS="crypto sysmon tokstat"
+          RUST_PLUGINS="highlight markdown xml"
+          ZIG_PLUGINS="crypto"
           ALL="$CMAKE_PLUGINS $RUST_PLUGINS $ZIG_PLUGINS"
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then

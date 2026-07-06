@@ -62,6 +62,7 @@ git push --tags
 | `barcode` | barcode | encode, decode | [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) |
 | `image` | image | metadata, decode, encode, process | [libwebp](https://github.com/webmproject/libwebp) + [stb](https://github.com/nothings/stb) |
 | `markdown` | markdown | render | Markdown → canonical UI IR |
+| `xml` | xml | parse, rss | XML tree parsing + RSS/Atom item extraction |
 | `highlight` | highlight | highlight | syntax highlighting (Rust) |
 | `aicreds` | aicreds | read | Live OAuth token for Claude Code / Codex — **stdio native** (darwin) |
 
