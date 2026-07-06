@@ -40,6 +40,7 @@ pub fn build(b: *std.Build) void {
     // ── Rust plugins (wasm32-wasip1，C 依赖经 zig cc 编) ────────────────────
     all.dependOn(addRustPlugin(b, "highlight"));
     all.dependOn(addRustPlugin(b, "markdown")); // comrak → IR node 树（pure Rust，无 C）
+    all.dependOn(addRustPlugin(b, "xml")); // XML/RSS/Atom parser（pure Rust）
 
     // ── stdio native 插件(per-platform 二进制)─────────────────────────────
     // aicreds:只读凭据插件(读 Claude Keychain / codex auth.json),供 tokstat app

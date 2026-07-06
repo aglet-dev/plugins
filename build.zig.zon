@@ -35,6 +35,7 @@
         "build.zig.zon",
         "barcode",
         "markdown",
+        "xml",
         "image",
         "archive",
         "crypto",
