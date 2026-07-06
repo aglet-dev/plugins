@@ -17,13 +17,15 @@
 //! platforms build once their credential store is wired.
 
 const std = @import("std");
-const posix = std.posix;
+const builtin = @import("builtin");
+const is_macos = builtin.os.tag == .macos;
 
 // ── libc bindings ──────────────────────────────────────────────────────
-
-const stdin_fd: posix.fd_t = 0;
-const stdout_fd: posix.fd_t = 1;
-const stderr_fd: posix.fd_t = 2;
+// CRT fds(POSIX 层):Windows 的 mingw/UCRT 也提供 read/write/open/close/lseek 的
+// POSIX 别名,且 CRT fd 0/1/2 = stdin/stdout/stderr 有效 → 用 c_int fd 跨平台。
+const stdin_fd: c_int = 0;
+const stdout_fd: c_int = 1;
+const stderr_fd: c_int = 2;
 
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
@@ -42,6 +44,19 @@ const O_RDONLY: c_int = 0;
 const SEEK_END: c_int = 2;
 const SEEK_SET: c_int = 0;
 
+// Windows: CRT fd 0/1/2 默认 **text 模式**,会把 \n↔\r\n 互译、把 Ctrl-Z 当 EOF。
+// MCP 的 `Content-Length: N\r\n\r\n` 帧头 + N 原始字节全靠字节精确,text 模式会把
+// 写出的 \r\n 变成 \r\r\n → 宿主 supervisor 找不到 \r\n\r\n 终止符 → 永久阻塞在读。
+// 进 MCP loop 前把 stdin/stdout 切 binary。mingw/UCRT 提供 _setmode。posix 无此概念。
+const O_BINARY: c_int = 0x8000;
+extern "c" fn _setmode(fd: c_int, mode: c_int) c_int;
+fn setBinaryStdio() void {
+    if (builtin.os.tag == .windows) {
+        _ = _setmode(stdin_fd, O_BINARY);
+        _ = _setmode(stdout_fd, O_BINARY);
+    }
+}
+
 // Debug log → stderr. daemon-side stdio_plugin drains it into the aglet
 // runtime log (prefix "[plugin:aicreds] ").
 fn tlog(comptime fmt: []const u8, args: anytype) void {
@@ -55,9 +70,10 @@ fn tlog(comptime fmt: []const u8, args: anytype) void {
 fn readAll(buf: []u8) !void {
     var got: usize = 0;
     while (got < buf.len) {
-        const n = try posix.read(stdin_fd, buf[got..]);
+        const n = read(stdin_fd, buf[got..].ptr, buf.len - got);
+        if (n < 0) return error.ReadFailed;
         if (n == 0) return error.EndOfStream;
-        got += n;
+        got += @intCast(n);
     }
 }
 
@@ -234,15 +250,17 @@ fn readWholeFile(arena: std.mem.Allocator, path_z: [:0]const u8) ![]u8 {
 
 // ── credential readers ────────────────────────────────────────────────
 
-/// Claude Code stores its OAuth blob in the macOS Keychain under service
-/// "Claude Code-credentials". `security -w` prints the raw password (the
-/// JSON blob); first read from a non-Claude-Code binary may prompt a
-/// Keychain authorization (user can "Always Allow").
-fn readClaudeToken(arena: std.mem.Allocator) ![]const u8 {
-    const kc = try spawnCaptureStdout(arena, &.{
-        "/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-w",
-    });
-    var parsed = std.json.parseFromSlice(std.json.Value, arena, std.mem.trim(u8, kc, " \t\r\n"), .{}) catch return error.KcParse;
+/// $HOME, or %USERPROFILE% on Windows (no HOME there). codex/claude paths hang off it.
+fn homeDir() ![]const u8 {
+    if (getenv("HOME")) |h| return std.mem.span(h);
+    if (getenv("USERPROFILE")) |h| return std.mem.span(h); // Windows
+    return error.NoHome;
+}
+
+/// Parse the Claude OAuth blob (Keychain password or credentials file body) →
+/// `claudeAiOauth.accessToken`.
+fn parseClaudeBlob(arena: std.mem.Allocator, blob: []const u8) ![]const u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, arena, std.mem.trim(u8, blob, " \t\r\n"), .{}) catch return error.KcParse;
     defer parsed.deinit();
     const root = switch (parsed.value) { .object => |o| o, else => return error.KcShape };
     const oauth = switch (root.get("claudeAiOauth") orelse return error.KcNoOauth) {
@@ -254,12 +272,27 @@ fn readClaudeToken(arena: std.mem.Allocator) ![]const u8 {
     return arena.dupe(u8, tok);
 }
 
+/// Claude Code's OAuth blob. macOS: `Claude Code-credentials` Keychain item
+/// (via `security -w`). Windows/Linux (no Keychain): plaintext
+/// `~/.claude/.credentials.json` (same `claudeAiOauth.accessToken` shape).
+fn readClaudeToken(arena: std.mem.Allocator) ![]const u8 {
+    if (is_macos) {
+        const kc = try spawnCaptureStdout(arena, &.{
+            "/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-w",
+        });
+        return parseClaudeBlob(arena, kc);
+    }
+    const home = try homeDir();
+    const path = try std.fmt.allocPrintSentinel(arena, "{s}/.claude/.credentials.json", .{home}, 0);
+    const bytes = try readWholeFile(arena, path);
+    return parseClaudeBlob(arena, bytes);
+}
+
 const CodexCred = struct { access_token: []const u8, account_id: ?[]const u8 };
 
 /// Codex keeps a plaintext `~/.codex/auth.json` (0600) with `tokens.*`.
 fn readCodexCred(arena: std.mem.Allocator) !CodexCred {
-    const home_cstr = getenv("HOME") orelse return error.NoHome;
-    const home = std.mem.span(home_cstr);
+    const home = try homeDir();
     const path = try std.fmt.allocPrintSentinel(arena, "{s}/.codex/auth.json", .{home}, 0);
     const bytes = try readWholeFile(arena, path);
     var parsed = std.json.parseFromSlice(std.json.Value, arena, bytes, .{}) catch return error.AuthParse;
@@ -401,11 +434,23 @@ fn runCheck() !void {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
+    // --check/--help 是本地 dev 便利(host spawn 插件时无参、直接进 MCP 模式)。Windows 的
+    // init.args.iterate() @compileError(需 allocator),而插件实际用途不传参 → 仅非 win 解析。
+    if (builtin.os.tag != .windows) {
+        if (parseArgs(init) catch false) return; // --check/--help 处理完即退,不进 MCP loop
+    }
+    setBinaryStdio(); // Windows：MCP 帧靠字节精确,stdin/stdout 必须 binary(见 setBinaryStdio)
+    tlog("=== aicreds start ===", .{}); // pid 略(std.c.getpid 非跨平台)
+    return runMcpLoop();
+}
+
+/// 返回 true 表示已处理终止型参数(--check/--help),调用方应直接退出。
+fn parseArgs(init: std.process.Init.Minimal) !bool {
     var it = init.args.iterate();
     _ = it.next(); // argv[0]
     while (it.next()) |arg_z| {
         const arg: []const u8 = arg_z;
-        if (std.mem.eql(u8, arg, "--check")) return runCheck();
+        if (std.mem.eql(u8, arg, "--check")) { try runCheck(); return true; }
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             const help =
                 "aicreds — read local AI tool OAuth tokens\n" ++
@@ -413,9 +458,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 "  aicreds            # MCP stdio plugin mode (default)\n" ++
                 "  aicreds --check    # token-free readability check\n";
             _ = write(stdout_fd, help.ptr, help.len);
-            return;
+            return true;
         }
     }
-    tlog("=== aicreds start pid={d} ===", .{std.c.getpid()});
-    return runMcpLoop();
+    return false;
 }

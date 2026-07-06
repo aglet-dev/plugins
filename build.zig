@@ -46,7 +46,12 @@ pub fn build(b: *std.Build) void {
     // aicreds:只读凭据插件(读 Claude Keychain / codex auth.json),供 tokstat app
     // 自己发用量 HTTP。取代旧 tokstat 插件(HTTP+PTY+JSONL 一体)——用量探测已
     // 迁进 tokstat app 的 scripts.js。sysmon 待后续。
-    all.dependOn(addStdioNativePlugin(b, "aicreds"));
+    all.dependOn(addStdioNativePlugin(b, "aicreds", b.graph.host)); // host(macOS/Linux)
+    // Windows 交叉编(mingw):aicreds 现跨平台(codex auth.json + Claude ~/.claude/.credentials.json),
+    // 供 tokstat 在 Windows 读 AI 用量。→ dist/aicreds-windows-x86_64.exe。
+    all.dependOn(addStdioNativePlugin(b, "aicreds", b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu,
+    })));
 }
 
 const CmakeDep = struct {
@@ -187,8 +192,7 @@ fn targetString(b: *std.Build, t: std.Target) []const u8 {
 /// PLUGINS.md). Built for the host target (no cross-compile here — CI on each
 /// runner OS produces its target's binary; future: a build matrix). Links libc
 /// for platform syscalls (Mach API on macOS, /proc on Linux).
-fn addStdioNativePlugin(b: *std.Build, id: []const u8) *std.Build.Step {
-    const target = b.graph.host;
+fn addStdioNativePlugin(b: *std.Build, id: []const u8, target: std.Build.ResolvedTarget) *std.Build.Step {
     const mod = b.createModule(.{
         .root_source_file = b.path(b.fmt("{s}/src/main.zig", .{id})),
         .target = target,
@@ -209,12 +213,17 @@ fn addStdioNativePlugin(b: *std.Build, id: []const u8) *std.Build.Step {
     // dist/<id>-<os>-<arch> —— per-target naming so multiple platforms coexist
     // in one .aplugin. aplugin.json backend.path is the base `dist/<id>`.
     const tname = b.fmt("{s}-{s}", .{ id, targetString(b, target.result) });
+    // Windows 二进制带 .exe(spawn/CreateProcess 需要;loader 也按 .exe 找)。
+    const out_name = if (target.result.os.tag == .windows) b.fmt("{s}.exe", .{tname}) else tname;
     const install = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = b.fmt("../{s}/dist", .{id}) } },
-        .dest_sub_path = tname,
+        .dest_sub_path = out_name,
     });
 
-    const step = b.step(id, b.fmt("Build {s}/dist/{s} (native stdio plugin)", .{ id, tname }));
+    // host 构建保留 `id` step 名(dev/CI 用 `zig build aicreds` + aplugin.json dev.build.cmd);
+    // 交叉编用 `id-<os>-<arch>`,多平台 step 共存。
+    const step_name = if (target.query.isNative()) id else tname;
+    const step = b.step(step_name, b.fmt("Build {s}/dist/{s} (native stdio plugin)", .{ id, tname }));
     step.dependOn(&install.step);
     return step;
 }

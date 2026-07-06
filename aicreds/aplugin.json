@@ -29,7 +29,7 @@
     "backend": {
       "kind": "stdio",
       "path": "dist/aicreds",
-      "targets": ["darwin-arm64"],
+      "targets": ["darwin-arm64", "windows-x86_64"],
       "capabilities": [
         "exec:fork",
         "fs:read:any"
