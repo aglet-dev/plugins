@@ -147,6 +147,10 @@ jobs:
           HOME: ${{ runner.temp }}
         run: |
           gh auth setup-git
+          # aglet plugin publish 会 git commit 到 registry clone;box 无 git 身份 → auto-detect
+          # email 失败。HOME=runner.temp 下 --global 写临时 gitconfig(job 隔离,不污染 box)。
+          git config --global user.name "aglet-ci"
+          git config --global user.email "aglet-ci@users.noreply.github.com"
           # --sign-template:对每个 windows per-target 二进制在算 sha 前 evsign(见 sign.ps1)。
           $sign = 'pwsh -NoProfile -ExecutionPolicy Bypass -File C:\signing\sign.ps1 {{file}}'
           aglet plugin publish "${{ needs.resolve.outputs.plugin }}/aplugin.json" --sign-template $sign
