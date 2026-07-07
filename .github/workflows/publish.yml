@@ -129,6 +129,9 @@ jobs:
         run: |
           set -e
           gh auth setup-git
+          # 统一 git 身份 aglet-dev-bot(对齐 aglet windows-release/release + 签名 runner 步骤)。
+          git config --global user.name  "aglet-dev-bot"
+          git config --global user.email "aglet-dev-bot@users.noreply.github.com"
           export AGLET_REGISTRY_URL="https://github.com/aglet-dev/registry.git"
           aglet plugin publish "${{ needs.resolve.outputs.plugin }}/aplugin.json"
       # ── 发布(签名 runner:evsign 签 windows 二进制 + publish + PR) ─────────────
@@ -149,8 +152,8 @@ jobs:
           gh auth setup-git
           # aglet plugin publish 会 git commit 到 registry clone;box 无 git 身份 → auto-detect
           # email 失败。HOME=runner.temp 下 --global 写临时 gitconfig(job 隔离,不污染 box)。
-          git config --global user.name "aglet-ci"
-          git config --global user.email "aglet-ci@users.noreply.github.com"
+          git config --global user.name  "aglet-dev-bot"
+          git config --global user.email "aglet-dev-bot@users.noreply.github.com"
           # --sign-template:对每个 windows per-target 二进制在算 sha 前 evsign(见 sign.ps1)。
           $sign = 'pwsh -NoProfile -ExecutionPolicy Bypass -File C:\signing\sign.ps1 {{file}}'
           aglet plugin publish "${{ needs.resolve.outputs.plugin }}/aplugin.json" --sign-template $sign
