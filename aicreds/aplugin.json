@@ -2,7 +2,7 @@
   "manifest": {
     "id": "aicreds",
     "name": "AI Credentials",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "plugin": true,
     "namespace": "aicreds",
     "description": {
