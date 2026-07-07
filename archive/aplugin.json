@@ -1,98 +1,96 @@
 {
-  "manifest": {
-    "id": "archive",
-    "name": "Archive",
-    "version": "0.1.0",
-    "plugin": true,
-    "namespace": "archive",
-    "description": {
-      "default": "Read zip / tar / tar.{gz,bz2,xz,zst} / rar (4 & 5). Write zip / tar / tar.{gz,xz,zst}.",
-      "zh": "读取 zip / tar / tar.{gz,bz2,xz,zst} / rar；写 zip / tar / tar.{gz,xz,zst}。",
-      "ja": "zip / tar / tar.{gz,bz2,xz,zst} / rar の読み込み。zip / tar / tar.{gz,xz,zst} の書き込み。"
+  "id": "archive",
+  "name": "Archive",
+  "version": "0.1.0",
+  "plugin": true,
+  "namespace": "archive",
+  "description": {
+    "default": "Read zip / tar / tar.{gz,bz2,xz,zst} / rar (4 & 5). Write zip / tar / tar.{gz,xz,zst}.",
+    "zh": "读取 zip / tar / tar.{gz,bz2,xz,zst} / rar；写 zip / tar / tar.{gz,xz,zst}。",
+    "ja": "zip / tar / tar.{gz,bz2,xz,zst} / rar の読み込み。zip / tar / tar.{gz,xz,zst} の書き込み。"
+  },
+  "keywords": [
+    "archive",
+    "zip",
+    "tar",
+    "rar",
+    "xz",
+    "zstd",
+    "compression"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/aglet-dev/plugins",
+  "actions": [
+    {
+      "name": "list",
+      "params": [
+        {
+          "key": "input_b64",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "key": "entries",
+          "type": "array"
+        }
+      ],
+      "permission": "archive:read"
     },
-    "keywords": [
-      "archive",
-      "zip",
-      "tar",
-      "rar",
-      "xz",
-      "zstd",
-      "compression"
-    ],
-    "license": "MIT",
-    "homepage": "https://github.com/aglet-dev/plugins",
-    "actions": [
-      {
-        "name": "list",
-        "params": [
-          {
-            "key": "input_b64",
-            "type": "string"
-          }
-        ],
-        "result": [
-          {
-            "key": "entries",
-            "type": "array"
-          }
-        ],
-        "permission": "archive:read"
-      },
-      {
-        "name": "extract",
-        "params": [
-          {
-            "key": "input_b64",
-            "type": "string"
-          },
-          {
-            "key": "path",
-            "type": "string"
-          }
-        ],
-        "result": [
-          {
-            "key": "bytes_b64",
-            "type": "string"
-          }
-        ],
-        "permission": "archive:read"
-      },
-      {
-        "name": "create",
-        "params": [
-          {
-            "key": "format",
-            "type": "string"
-          },
-          {
-            "key": "entries",
-            "type": "array"
-          }
-        ],
-        "result": [
-          {
-            "key": "output_b64",
-            "type": "string"
-          }
-        ],
-        "permission": "archive:write"
-      }
-    ],
-    "backend": {
-      "kind": "wasm",
-      "path": "dist/archive.wasm",
-      "wasi_imports": [
-        "env.emscripten_notify_memory_growth",
-        "env.__syscall_pipe2",
-        "env.__syscall_poll",
-        "wasi_snapshot_preview1.fd_close",
-        "wasi_snapshot_preview1.fd_write",
-        "wasi_snapshot_preview1.fd_seek",
-        "wasi_snapshot_preview1.fd_read",
-        "wasi_snapshot_preview1.clock_time_get",
-        "wasi_snapshot_preview1.proc_exit"
-      ]
+    {
+      "name": "extract",
+      "params": [
+        {
+          "key": "input_b64",
+          "type": "string"
+        },
+        {
+          "key": "path",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "key": "bytes_b64",
+          "type": "string"
+        }
+      ],
+      "permission": "archive:read"
+    },
+    {
+      "name": "create",
+      "params": [
+        {
+          "key": "format",
+          "type": "string"
+        },
+        {
+          "key": "entries",
+          "type": "array"
+        }
+      ],
+      "result": [
+        {
+          "key": "output_b64",
+          "type": "string"
+        }
+      ],
+      "permission": "archive:write"
     }
+  ],
+  "backend": {
+    "kind": "wasm",
+    "path": "dist/archive.wasm",
+    "wasi_imports": [
+      "env.emscripten_notify_memory_growth",
+      "env.__syscall_pipe2",
+      "env.__syscall_poll",
+      "wasi_snapshot_preview1.fd_close",
+      "wasi_snapshot_preview1.fd_write",
+      "wasi_snapshot_preview1.fd_seek",
+      "wasi_snapshot_preview1.fd_read",
+      "wasi_snapshot_preview1.clock_time_get",
+      "wasi_snapshot_preview1.proc_exit"
+    ]
   }
 }

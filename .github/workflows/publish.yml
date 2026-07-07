@@ -32,6 +32,11 @@ on:
 permissions:
   contents: read
 
+# 串行化:多插件同时发时,避免并发推 aglet-dev/registry 撞车(对齐 aglet-apps publish.yml)。
+concurrency:
+  group: registry-publish
+  cancel-in-progress: false
+
 jobs:
   # ── 解析 plugin/version + 判断是否需要 windows 签名(据 backend.targets) ──────────
   resolve:
@@ -53,10 +58,10 @@ jobs:
             TAG="${GITHUB_REF#refs/tags/}"; PLUGIN="${TAG%-v*}"; VERSION="${TAG##*-v}"
           fi
           [ -f "$PLUGIN/aplugin.json" ] || { echo "✗ $PLUGIN/aplugin.json missing"; exit 1; }
-          MANIFEST_VER=$(jq -r .manifest.version "$PLUGIN/aplugin.json")
+          MANIFEST_VER=$(jq -r .version "$PLUGIN/aplugin.json")
           [ "$MANIFEST_VER" = "$VERSION" ] || { echo "✗ tag $VERSION ≠ manifest.version $MANIFEST_VER"; exit 1; }
           # backend.targets[] 里有 windows-* → 需签名 runner 发布;否则(wasm/纯 host) macos 发布。
-          HAS_WIN=$(jq -r '[.manifest.backend.targets // [] | .[] | select(startswith("windows"))] | length > 0' "$PLUGIN/aplugin.json")
+          HAS_WIN=$(jq -r '[.backend.targets // [] | .[] | select(startswith("windows"))] | length > 0' "$PLUGIN/aplugin.json")
           if [ "$HAS_WIN" = "true" ]; then
             RUNNER='["self-hosted","windows-signing"]'
           else

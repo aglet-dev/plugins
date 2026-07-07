@@ -1,54 +1,82 @@
 {
-  "manifest": {
-    "id": "xml",
-    "name": "XML",
-    "version": "0.1.0",
-    "plugin": true,
-    "namespace": "xml",
-    "description": {
-      "default": "Parse XML and normalize RSS/Atom feeds for Aglet apps.",
-      "zh": "解析 XML，并把 RSS/Atom feed 归一化供 Aglet 应用使用。",
-      "ja": "XML を解析し、RSS/Atom フィードを Aglet アプリ向けに正規化します。"
+  "id": "xml",
+  "name": "XML",
+  "version": "0.1.0",
+  "plugin": true,
+  "namespace": "xml",
+  "description": {
+    "default": "Parse XML and normalize RSS/Atom feeds for Aglet apps.",
+    "zh": "解析 XML，并把 RSS/Atom feed 归一化供 Aglet 应用使用。",
+    "ja": "XML を解析し、RSS/Atom フィードを Aglet アプリ向けに正規化します。"
+  },
+  "keywords": [
+    "xml",
+    "rss",
+    "atom",
+    "feed",
+    "parser"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/aglet-dev/plugins",
+  "actions": [
+    {
+      "name": "parse",
+      "params": [
+        {
+          "key": "text",
+          "type": "string"
+        },
+        {
+          "key": "trim_text",
+          "type": "boolean"
+        },
+        {
+          "key": "max_nodes",
+          "type": "number"
+        }
+      ],
+      "result": [
+        {
+          "key": "root",
+          "type": "object"
+        }
+      ],
+      "permission": "xml:parse"
     },
-    "keywords": ["xml", "rss", "atom", "feed", "parser"],
-    "license": "MIT",
-    "homepage": "https://github.com/aglet-dev/plugins",
-    "actions": [
-      {
-        "name": "parse",
-        "params": [
-          { "key": "text", "type": "string" },
-          { "key": "trim_text", "type": "boolean" },
-          { "key": "max_nodes", "type": "number" }
-        ],
-        "result": [
-          { "key": "root", "type": "object" }
-        ],
-        "permission": "xml:parse"
-      },
-      {
-        "name": "rss",
-        "params": [
-          { "key": "text", "type": "string" },
-          { "key": "limit", "type": "number" }
-        ],
-        "result": [
-          { "key": "feed", "type": "object" },
-          { "key": "items", "type": "array" }
-        ],
-        "permission": "xml:parse"
-      }
-    ],
-    "backend": {
-      "kind": "wasm",
-      "path": "dist/xml.wasm",
-      "wasi_imports": [
-        "wasi_snapshot_preview1.random_get",
-        "wasi_snapshot_preview1.environ_get",
-        "wasi_snapshot_preview1.environ_sizes_get",
-        "wasi_snapshot_preview1.fd_write",
-        "wasi_snapshot_preview1.proc_exit"
-      ]
+    {
+      "name": "rss",
+      "params": [
+        {
+          "key": "text",
+          "type": "string"
+        },
+        {
+          "key": "limit",
+          "type": "number"
+        }
+      ],
+      "result": [
+        {
+          "key": "feed",
+          "type": "object"
+        },
+        {
+          "key": "items",
+          "type": "array"
+        }
+      ],
+      "permission": "xml:parse"
     }
+  ],
+  "backend": {
+    "kind": "wasm",
+    "path": "dist/xml.wasm",
+    "wasi_imports": [
+      "wasi_snapshot_preview1.random_get",
+      "wasi_snapshot_preview1.environ_get",
+      "wasi_snapshot_preview1.environ_sizes_get",
+      "wasi_snapshot_preview1.fd_write",
+      "wasi_snapshot_preview1.proc_exit"
+    ]
   }
 }

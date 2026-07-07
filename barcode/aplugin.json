@@ -1,93 +1,97 @@
 {
-  "manifest": {
-    "id": "barcode",
-    "name": "Barcode",
-    "version": "0.1.0",
-    "plugin": true,
-    "namespace": "barcode",
-    "description": {
-      "default": "Barcode & QR encode / decode (zxing-cpp).",
-      "zh": "条码 / 二维码编解码(zxing-cpp)。",
-      "ja": "バーコード / QR のエンコード・デコード(zxing-cpp)。"
+  "id": "barcode",
+  "name": "Barcode",
+  "version": "0.1.0",
+  "plugin": true,
+  "namespace": "barcode",
+  "description": {
+    "default": "Barcode & QR encode / decode (zxing-cpp).",
+    "zh": "条码 / 二维码编解码(zxing-cpp)。",
+    "ja": "バーコード / QR のエンコード・デコード(zxing-cpp)。"
+  },
+  "keywords": [
+    "barcode",
+    "qr",
+    "encode",
+    "decode",
+    "zxing"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/aglet-dev/plugins",
+  "actions": [
+    {
+      "name": "encode",
+      "params": [
+        {
+          "key": "text",
+          "type": "string"
+        },
+        {
+          "key": "format",
+          "type": "string"
+        },
+        {
+          "key": "ecc",
+          "type": "integer"
+        },
+        {
+          "key": "margin",
+          "type": "integer"
+        },
+        {
+          "key": "width",
+          "type": "integer"
+        },
+        {
+          "key": "height",
+          "type": "integer"
+        }
+      ],
+      "result": [
+        {
+          "key": "dataUrl",
+          "type": "string"
+        }
+      ],
+      "permission": "barcode:encode"
     },
-    "keywords": ["barcode","qr","encode","decode","zxing"],
-    "license": "MIT",
-    "homepage": "https://github.com/aglet-dev/plugins",
-    "actions": [
-      {
-        "name": "encode",
-        "params": [
-          {
-            "key": "text",
-            "type": "string"
-          },
-          {
-            "key": "format",
-            "type": "string"
-          },
-          {
-            "key": "ecc",
-            "type": "integer"
-          },
-          {
-            "key": "margin",
-            "type": "integer"
-          },
-          {
-            "key": "width",
-            "type": "integer"
-          },
-          {
-            "key": "height",
-            "type": "integer"
-          }
-        ],
-        "result": [
-          {
-            "key": "dataUrl",
-            "type": "string"
-          }
-        ],
-        "permission": "barcode:encode"
-      },
-      {
-        "name": "decode",
-        "params": [
-          {
-            "key": "width",
-            "type": "integer"
-          },
-          {
-            "key": "height",
-            "type": "integer"
-          },
-          {
-            "key": "pixels_b64",
-            "type": "string"
-          }
-        ],
-        "result": [
-          {
-            "key": "text",
-            "type": "string"
-          },
-          {
-            "key": "format",
-            "type": "string"
-          }
-        ],
-        "permission": "barcode:decode"
-      }
-    ],
-    "backend": {
-      "kind": "wasm",
-      "path": "dist/barcode.wasm",
-      "wasi_imports": [
-        "env.emscripten_notify_memory_growth",
-        "wasi_snapshot_preview1.fd_close",
-        "wasi_snapshot_preview1.fd_write",
-        "wasi_snapshot_preview1.fd_seek"
-      ]
+    {
+      "name": "decode",
+      "params": [
+        {
+          "key": "width",
+          "type": "integer"
+        },
+        {
+          "key": "height",
+          "type": "integer"
+        },
+        {
+          "key": "pixels_b64",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "key": "text",
+          "type": "string"
+        },
+        {
+          "key": "format",
+          "type": "string"
+        }
+      ],
+      "permission": "barcode:decode"
     }
+  ],
+  "backend": {
+    "kind": "wasm",
+    "path": "dist/barcode.wasm",
+    "wasi_imports": [
+      "env.emscripten_notify_memory_growth",
+      "wasi_snapshot_preview1.fd_close",
+      "wasi_snapshot_preview1.fd_write",
+      "wasi_snapshot_preview1.fd_seek"
+    ]
   }
 }

@@ -1,170 +1,175 @@
 {
-  "manifest": {
-    "id": "image",
-    "name": "Image",
-    "version": "0.1.0",
-    "plugin": true,
-    "namespace": "image",
-    "description": {
-      "default": "Image encode / decode / metadata (libwebp, stb).",
-      "zh": "图片编解码 / 元数据(libwebp、stb)。",
-      "ja": "画像のエンコード・デコード・メタデータ(libwebp、stb)。"
+  "id": "image",
+  "name": "Image",
+  "version": "0.1.0",
+  "plugin": true,
+  "namespace": "image",
+  "description": {
+    "default": "Image encode / decode / metadata (libwebp, stb).",
+    "zh": "图片编解码 / 元数据(libwebp、stb)。",
+    "ja": "画像のエンコード・デコード・メタデータ(libwebp、stb)。"
+  },
+  "keywords": [
+    "image",
+    "webp",
+    "png",
+    "jpeg",
+    "encode",
+    "decode"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/aglet-dev/plugins",
+  "actions": [
+    {
+      "name": "metadata",
+      "params": [
+        {
+          "key": "input_b64",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "key": "width",
+          "type": "integer"
+        },
+        {
+          "key": "height",
+          "type": "integer"
+        },
+        {
+          "key": "channels",
+          "type": "integer"
+        },
+        {
+          "key": "format",
+          "type": "string"
+        }
+      ],
+      "permission": "image:read"
     },
-    "keywords": ["image","webp","png","jpeg","encode","decode"],
-    "license": "MIT",
-    "homepage": "https://github.com/aglet-dev/plugins",
-    "actions": [
-      {
-        "name": "metadata",
-        "params": [
-          {
-            "key": "input_b64",
-            "type": "string"
-          }
-        ],
-        "result": [
-          {
-            "key": "width",
-            "type": "integer"
-          },
-          {
-            "key": "height",
-            "type": "integer"
-          },
-          {
-            "key": "channels",
-            "type": "integer"
-          },
-          {
-            "key": "format",
-            "type": "string"
-          }
-        ],
-        "permission": "image:read"
-      },
-      {
-        "name": "decode",
-        "params": [
-          {
-            "key": "input_b64",
-            "type": "string"
-          }
-        ],
-        "result": [
-          {
-            "key": "pixels_b64",
-            "type": "string"
-          },
-          {
-            "key": "width",
-            "type": "integer"
-          },
-          {
-            "key": "height",
-            "type": "integer"
-          },
-          {
-            "key": "channels",
-            "type": "integer"
-          },
-          {
-            "key": "src_format",
-            "type": "string"
-          }
-        ],
-        "permission": "image:read"
-      },
-      {
-        "name": "encode",
-        "params": [
-          {
-            "key": "pixels_b64",
-            "type": "string"
-          },
-          {
-            "key": "width",
-            "type": "integer"
-          },
-          {
-            "key": "height",
-            "type": "integer"
-          },
-          {
-            "key": "format",
-            "type": "string"
-          },
-          {
-            "key": "quality",
-            "type": "integer"
-          },
-          {
-            "key": "lossless",
-            "type": "boolean"
-          }
-        ],
-        "result": [
-          {
-            "key": "output_b64",
-            "type": "string"
-          },
-          {
-            "key": "format",
-            "type": "string"
-          }
-        ],
-        "permission": "image:convert"
-      },
-      {
-        "name": "process",
-        "params": [
-          {
-            "key": "input_b64",
-            "type": "string"
-          },
-          {
-            "key": "ops",
-            "type": "array"
-          },
-          {
-            "key": "output_format",
-            "type": "string"
-          },
-          {
-            "key": "quality",
-            "type": "integer"
-          },
-          {
-            "key": "lossless",
-            "type": "boolean"
-          }
-        ],
-        "result": [
-          {
-            "key": "output_b64",
-            "type": "string"
-          },
-          {
-            "key": "width",
-            "type": "integer"
-          },
-          {
-            "key": "height",
-            "type": "integer"
-          },
-          {
-            "key": "format",
-            "type": "string"
-          }
-        ],
-        "permission": "image:convert"
-      }
-    ],
-    "backend": {
-      "kind": "wasm",
-      "path": "dist/image.wasm",
-      "wasi_imports": [
-        "env.emscripten_notify_memory_growth"
-      ]
+    {
+      "name": "decode",
+      "params": [
+        {
+          "key": "input_b64",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "key": "pixels_b64",
+          "type": "string"
+        },
+        {
+          "key": "width",
+          "type": "integer"
+        },
+        {
+          "key": "height",
+          "type": "integer"
+        },
+        {
+          "key": "channels",
+          "type": "integer"
+        },
+        {
+          "key": "src_format",
+          "type": "string"
+        }
+      ],
+      "permission": "image:read"
+    },
+    {
+      "name": "encode",
+      "params": [
+        {
+          "key": "pixels_b64",
+          "type": "string"
+        },
+        {
+          "key": "width",
+          "type": "integer"
+        },
+        {
+          "key": "height",
+          "type": "integer"
+        },
+        {
+          "key": "format",
+          "type": "string"
+        },
+        {
+          "key": "quality",
+          "type": "integer"
+        },
+        {
+          "key": "lossless",
+          "type": "boolean"
+        }
+      ],
+      "result": [
+        {
+          "key": "output_b64",
+          "type": "string"
+        },
+        {
+          "key": "format",
+          "type": "string"
+        }
+      ],
+      "permission": "image:convert"
+    },
+    {
+      "name": "process",
+      "params": [
+        {
+          "key": "input_b64",
+          "type": "string"
+        },
+        {
+          "key": "ops",
+          "type": "array"
+        },
+        {
+          "key": "output_format",
+          "type": "string"
+        },
+        {
+          "key": "quality",
+          "type": "integer"
+        },
+        {
+          "key": "lossless",
+          "type": "boolean"
+        }
+      ],
+      "result": [
+        {
+          "key": "output_b64",
+          "type": "string"
+        },
+        {
+          "key": "width",
+          "type": "integer"
+        },
+        {
+          "key": "height",
+          "type": "integer"
+        },
+        {
+          "key": "format",
+          "type": "string"
+        }
+      ],
+      "permission": "image:convert"
     }
+  ],
+  "backend": {
+    "kind": "wasm",
+    "path": "dist/image.wasm",
+    "wasi_imports": [
+      "env.emscripten_notify_memory_growth"
+    ]
   }
 }
