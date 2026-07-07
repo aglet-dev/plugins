@@ -1,7 +1,7 @@
 {
   "id": "aicreds",
   "name": "AI Credentials",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "plugin": true,
   "namespace": "aicreds",
   "description": {
@@ -49,6 +49,7 @@
     "path": "dist/aicreds",
     "targets": [
       "darwin-arm64",
+      "darwin-x86_64",
       "windows-x86_64"
     ],
     "capabilities": [
