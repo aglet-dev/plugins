@@ -141,6 +141,10 @@ jobs:
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PWD: ${{ secrets.EVSIGN_PWD }}
           AGLET_REGISTRY_URL: https://github.com/aglet-dev/registry.git
+          # aglet plugin publish 用 $HOME 定 registry 克隆目录;Windows 无 HOME(用
+          # USERPROFILE)→ NoHome。CI 显式给个可写目录。(CLI 侧也补了 USERPROFILE 回退,
+          # 随下次 CLI 发布生效;此 env 兜底当前已发的 CLI。)
+          HOME: ${{ runner.temp }}
         run: |
           gh auth setup-git
           # --sign-template:对每个 windows per-target 二进制在算 sha 前 evsign(见 sign.ps1)。
