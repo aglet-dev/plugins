@@ -122,10 +122,16 @@ jobs:
         run: |
           brew tap aglet-dev/tap
           brew install aglet-dev/tap/aglet
-      - name: Verify aglet CLI (signing runner)
+      - name: Update + verify aglet CLI (signing runner)
         if: needs.resolve.outputs.has_windows == 'true'
         shell: pwsh
-        run: aglet --version   # 缺则 runner 未装 aglet.exe(见 workflow 头部前置说明)
+        # runner 的 aglet.exe 经 scoop 装(见 workflow 头部前置)。每次发布前刷到 scoop-bucket
+        # 最新 —— 保证用最新 CLI 契约(如 aplugin 扁平化需 ≥0.1.5)。scoop 装在 runner 用户
+        # profile,故必须在 workflow 步骤(runner 用户上下文)里更新,不能从外部会话改。
+        run: |
+          scoop update
+          scoop update aglet
+          aglet --version
       # ── 发布(macOS:无 windows,不签) ──────────────────────────────────────────
       - name: Publish (macOS, no signing)
         if: needs.resolve.outputs.has_windows != 'true'
