@@ -74,7 +74,8 @@ another app's credentials is an OS-privileged operation a sandboxed aglet can't 
 lives in a small, single-purpose plugin. It makes no network calls of its own. Ships with
 the `tokstat` app. (Supersedes the old `tokstat` plugin, which bundled the HTTP/PTY probes;
 those moved into the app.) The wasm plugins above publish to the registry when an app that
-needs them ships. `sysmon` (stdio, macOS) is deferred to a later release.
+needs them ships. `sysmon` (stdio, macOS) ships host system metrics (CPU/memory/disk/
+battery/GPU/temp/fan/network) and powers the `netspeed` menu-bar widget.
 
 ## License
 

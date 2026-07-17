@@ -45,18 +45,27 @@ pub fn build(b: *std.Build) void {
     // ── stdio native 插件(per-platform 二进制)─────────────────────────────
     // aicreds:只读凭据插件(读 Claude Keychain / codex auth.json),供 tokstat app
     // 自己发用量 HTTP。取代旧 tokstat 插件(HTTP+PTY+JSONL 一体)——用量探测已
-    // 迁进 tokstat app 的 scripts.js。sysmon 待后续。
-    all.dependOn(addStdioNativePlugin(b, "aicreds", b.graph.host)); // host(macOS arm64 CI/Linux)
+    // 迁进 tokstat app 的 scripts.js。
+    all.dependOn(addStdioNativePlugin(b, "aicreds", b.graph.host, &.{})); // host(macOS arm64 CI/Linux)
     // macOS Intel(x86_64)交叉编 —— per-arch(下载更小,install 按 host 候选只下匹配的一个);
     // arm64 host 上跨编 x86_64 切片(zig 自带)。→ dist/aicreds-darwin-x86_64。
     all.dependOn(addStdioNativePlugin(b, "aicreds", b.resolveTargetQuery(.{
         .cpu_arch = .x86_64, .os_tag = .macos,
-    })));
+    }), &.{}));
     // Windows 交叉编(mingw):aicreds 现跨平台(codex auth.json + Claude ~/.claude/.credentials.json),
     // 供 tokstat 在 Windows 读 AI 用量。→ dist/aicreds-windows-x86_64.exe。
     all.dependOn(addStdioNativePlugin(b, "aicreds", b.resolveTargetQuery(.{
         .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu,
-    })));
+    }), &.{}));
+
+    // sysmon:宿主系统监控 stdio 插件(iStat 式:cpu/mem/disk/battery/gpu/temp/fan/network)。
+    // battery/gpu 走 IOKit + CoreFoundation,temp 走私有 IOHIDEventSystemClient,fan 走 SMC —— 都
+    // 要链 IOKit/CoreFoundation。故 **host-only(macOS)**,不跨编(framework SDK sysroot 只在 host
+    // 天然可用)。Windows/Linux 切片待后续单独处理(Linux /proc 无 framework;Windows 另 API)。
+    // netspeed app requires sysmon.network 取实时上下行。
+    if (b.graph.host.result.os.tag == .macos) {
+        all.dependOn(addStdioNativePlugin(b, "sysmon", b.graph.host, &.{ "IOKit", "CoreFoundation" }));
+    }
 }
 
 const CmakeDep = struct {
@@ -197,7 +206,7 @@ fn targetString(b: *std.Build, t: std.Target) []const u8 {
 /// PLUGINS.md). Built for the host target (no cross-compile here — CI on each
 /// runner OS produces its target's binary; future: a build matrix). Links libc
 /// for platform syscalls (Mach API on macOS, /proc on Linux).
-fn addStdioNativePlugin(b: *std.Build, id: []const u8, target: std.Build.ResolvedTarget) *std.Build.Step {
+fn addStdioNativePlugin(b: *std.Build, id: []const u8, target: std.Build.ResolvedTarget, frameworks: []const []const u8) *std.Build.Step {
     const mod = b.createModule(.{
         .root_source_file = b.path(b.fmt("{s}/src/main.zig", .{id})),
         .target = target,
@@ -208,11 +217,11 @@ fn addStdioNativePlugin(b: *std.Build, id: []const u8, target: std.Build.Resolve
         .name = id,
         .root_module = mod,
     });
-    // 不默认链任何 macOS framework:当前 stdio 插件(aicreds)经 `security` CLI 子进程
-    // 读 Keychain,不用 framework。无条件链 IOKit/CoreFoundation 会破坏交叉编
-    // (x86_64-macos 从 arm64 host 跨编时找不到 framework 搜索路径)。将来需要
-    // framework 的插件(如 sysmon 的 IOKit battery/gpu)应按插件单独声明 + 处理
-    // 交叉编的 SDK sysroot,而非在此对所有插件无条件链。
+    // 默认不链 macOS framework:aicreds 经 `security` CLI 子进程读 Keychain,不用 framework;
+    // 无条件链会破坏交叉编(x86_64-macos 从 arm64 host 跨编找不到 framework 搜索路径)。
+    // 需要 framework 的插件(sysmon 的 IOKit battery/gpu/temp/fan)显式传 frameworks——
+    // 且只对 host-native 构建声明(不跨编),SDK sysroot 天然可用。
+    for (frameworks) |fw| mod.linkFramework(fw, .{});
 
     // dist/<id>-<os>-<arch> —— per-target naming so multiple platforms coexist
     // in one .aplugin. aplugin.json backend.path is the base `dist/<id>`.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Add `sysmon`** (stdio, macOS) — host system metrics: CPU, memory, disk,
+  battery, GPU, temperature, fan, and network throughput. Long-lived native
+  subprocess that holds prior-tick state for delta-based sampling. `snapshot`
+  returns everything; individual actions (`cpu`, `memory`, `network`, …) return
+  one section. Network rate is read via `sysctl(NET_RT_IFLIST2)` (the byte
+  counters `getifaddrs` exposes are unreliable on macOS); per-second rate plus a
+  monotonic session total. Powers the `netspeed` menu-bar widget.
 - **Add `xml`** (wasm) — a pure Rust XML utility plugin. `xml.parse` returns a
   lightweight element tree; `xml.rss` normalizes RSS 2.0 and Atom feeds into
   feed metadata plus item arrays for reader-style aglets.
@@ -31,5 +38,5 @@ Inaugural public release. 7 plugins — 6 WebAssembly (sandboxed, cross-platform
 | `barcode` | 0.1.1 | wasm | barcode & QR encode / decode |
 
 `tokstat` publishes to the registry with the `tokstat` app in 0.1.0. The wasm
-plugins publish when an app that requires them ships. `sysmon` (stdio, macOS) is
-deferred to a later release.
+plugins publish when an app that requires them ships. `sysmon` (stdio, macOS)
+publishes with the `netspeed` app.
