@@ -1,256 +1,256 @@
 {
-  "manifest": {
-    "id": "sysmon",
-    "name": "Sysmon",
-    "version": "0.1.0",
-    "plugin": true,
-    "namespace": "sysmon",
-    "description": {
-      "default": "Host system metrics — CPU, memory, disk. Long-lived stdio subprocess (zig native binary; macOS Mach API, Linux /proc) that holds prior-tick state for delta-based CPU sampling. Richer than the bundled `sysinfo` static plugin (one-shot, no state).",
-      "zh": "宿主机系统监控：CPU、内存、磁盘。stdio 子进程（zig native binary；macOS Mach API、Linux /proc）长寿命可持上一刻状态，做 CPU 增量采样。比内置 sysinfo 静态插件（无状态一次性）更适合长期监控。",
-      "ja": "ホストシステムメトリクス：CPU・メモリ・ディスク。長命な stdio サブプロセス（zig ネイティブバイナリ。macOS は Mach API、Linux は /proc）が前回サンプルの状態を保持し、CPU の差分計測を行う。"
-    },
-    "license": "MIT",
-    "keywords": [
-      "system",
-      "monitoring",
-      "cpu",
-      "memory",
-      "disk",
-      "sysmon",
-      "istat"
-    ],
-    "homepage": "https://github.com/agent-rt/aglet-plugins",
-    "actions": [
-      {
-        "name": "snapshot",
-        "params": [],
-        "result": [
-          {
-            "key": "cpu",
-            "type": "object"
-          },
-          {
-            "key": "memory",
-            "type": "object"
-          },
-          {
-            "key": "disk",
-            "type": "object"
-          },
-          {
-            "key": "battery",
-            "type": "object"
-          },
-          {
-            "key": "gpu",
-            "type": "object"
-          },
-          {
-            "key": "temp",
-            "type": "object"
-          },
-          {
-            "key": "fan",
-            "type": "object"
-          },
-          {
-            "key": "network",
-            "type": "object"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "cpu",
-        "params": [],
-        "result": [
-          {
-            "key": "used_pct",
-            "type": "number"
-          },
-          {
-            "key": "user_pct",
-            "type": "number"
-          },
-          {
-            "key": "sys_pct",
-            "type": "number"
-          },
-          {
-            "key": "idle_pct",
-            "type": "number"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "memory",
-        "params": [],
-        "result": [
-          {
-            "key": "used_bytes",
-            "type": "integer"
-          },
-          {
-            "key": "total_bytes",
-            "type": "integer"
-          },
-          {
-            "key": "used_pct",
-            "type": "number"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "disk",
-        "params": [
-          {
-            "key": "path",
-            "type": "string"
-          }
-        ],
-        "result": [
-          {
-            "key": "used_bytes",
-            "type": "integer"
-          },
-          {
-            "key": "total_bytes",
-            "type": "integer"
-          },
-          {
-            "key": "free_bytes",
-            "type": "integer"
-          },
-          {
-            "key": "used_pct",
-            "type": "number"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "battery",
-        "params": [],
-        "result": [
-          {
-            "key": "present",
-            "type": "boolean"
-          },
-          {
-            "key": "percent",
-            "type": "number"
-          },
-          {
-            "key": "charging",
-            "type": "boolean"
-          },
-          {
-            "key": "power_source",
-            "type": "string"
-          },
-          {
-            "key": "time_remaining_min",
-            "type": "integer"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "gpu",
-        "params": [],
-        "result": [
-          {
-            "key": "util_pct",
-            "type": "number"
-          },
-          {
-            "key": "mem_used_bytes",
-            "type": "integer"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "temp",
-        "params": [],
-        "result": [
-          {
-            "key": "present",
-            "type": "boolean"
-          },
-          {
-            "key": "cpu_c",
-            "type": "number"
-          },
-          {
-            "key": "gpu_c",
-            "type": "number"
-          },
-          {
-            "key": "max_c",
-            "type": "number"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "fan",
-        "params": [],
-        "result": [
-          {
-            "key": "present",
-            "type": "boolean"
-          },
-          {
-            "key": "count",
-            "type": "integer"
-          },
-          {
-            "key": "rpm",
-            "type": "number"
-          }
-        ],
-        "permission": "system:read"
-      },
-      {
-        "name": "network",
-        "params": [],
-        "result": [
-          {
-            "key": "rx_bytes_per_sec",
-            "type": "number"
-          },
-          {
-            "key": "tx_bytes_per_sec",
-            "type": "number"
-          },
-          {
-            "key": "rx_total",
-            "type": "integer"
-          },
-          {
-            "key": "tx_total",
-            "type": "integer"
-          }
-        ],
-        "permission": "system:read"
-      }
-    ],
-    "backend": {
-      "kind": "stdio",
-      "path": "dist/sysmon",
-      "targets": ["darwin-arm64"],
-      "capabilities": [
-        "fs:read:/proc",
-        "fs:read:/sys",
-        "net:none"
+  "id": "sysmon",
+  "name": "Sysmon",
+  "version": "0.1.0",
+  "plugin": true,
+  "namespace": "sysmon",
+  "description": {
+    "default": "Host system metrics — CPU, memory, disk. Long-lived stdio subprocess (zig native binary; macOS Mach API, Linux /proc) that holds prior-tick state for delta-based CPU sampling. Richer than the bundled `sysinfo` static plugin (one-shot, no state).",
+    "zh": "宿主机系统监控：CPU、内存、磁盘。stdio 子进程（zig native binary；macOS Mach API、Linux /proc）长寿命可持上一刻状态，做 CPU 增量采样。比内置 sysinfo 静态插件（无状态一次性）更适合长期监控。",
+    "ja": "ホストシステムメトリクス：CPU・メモリ・ディスク。長命な stdio サブプロセス（zig ネイティブバイナリ。macOS は Mach API、Linux は /proc）が前回サンプルの状態を保持し、CPU の差分計測を行う。"
+  },
+  "license": "MIT",
+  "keywords": [
+    "system",
+    "monitoring",
+    "cpu",
+    "memory",
+    "disk",
+    "sysmon",
+    "istat"
+  ],
+  "homepage": "https://github.com/agent-rt/aglet-plugins",
+  "actions": [
+    {
+      "name": "snapshot",
+      "params": [],
+      "result": [
+        {
+          "key": "cpu",
+          "type": "object"
+        },
+        {
+          "key": "memory",
+          "type": "object"
+        },
+        {
+          "key": "disk",
+          "type": "object"
+        },
+        {
+          "key": "battery",
+          "type": "object"
+        },
+        {
+          "key": "gpu",
+          "type": "object"
+        },
+        {
+          "key": "temp",
+          "type": "object"
+        },
+        {
+          "key": "fan",
+          "type": "object"
+        },
+        {
+          "key": "network",
+          "type": "object"
+        }
       ],
-      "emits": [
-        "cpu"
-      ]
+      "permission": "system:read"
+    },
+    {
+      "name": "cpu",
+      "params": [],
+      "result": [
+        {
+          "key": "used_pct",
+          "type": "number"
+        },
+        {
+          "key": "user_pct",
+          "type": "number"
+        },
+        {
+          "key": "sys_pct",
+          "type": "number"
+        },
+        {
+          "key": "idle_pct",
+          "type": "number"
+        }
+      ],
+      "permission": "system:read"
+    },
+    {
+      "name": "memory",
+      "params": [],
+      "result": [
+        {
+          "key": "used_bytes",
+          "type": "integer"
+        },
+        {
+          "key": "total_bytes",
+          "type": "integer"
+        },
+        {
+          "key": "used_pct",
+          "type": "number"
+        }
+      ],
+      "permission": "system:read"
+    },
+    {
+      "name": "disk",
+      "params": [
+        {
+          "key": "path",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "key": "used_bytes",
+          "type": "integer"
+        },
+        {
+          "key": "total_bytes",
+          "type": "integer"
+        },
+        {
+          "key": "free_bytes",
+          "type": "integer"
+        },
+        {
+          "key": "used_pct",
+          "type": "number"
+        }
+      ],
+      "permission": "system:read"
+    },
+    {
+      "name": "battery",
+      "params": [],
+      "result": [
+        {
+          "key": "present",
+          "type": "boolean"
+        },
+        {
+          "key": "percent",
+          "type": "number"
+        },
+        {
+          "key": "charging",
+          "type": "boolean"
+        },
+        {
+          "key": "power_source",
+          "type": "string"
+        },
+        {
+          "key": "time_remaining_min",
+          "type": "integer"
+        }
+      ],
+      "permission": "system:read"
+    },
+    {
+      "name": "gpu",
+      "params": [],
+      "result": [
+        {
+          "key": "util_pct",
+          "type": "number"
+        },
+        {
+          "key": "mem_used_bytes",
+          "type": "integer"
+        }
+      ],
+      "permission": "system:read"
+    },
+    {
+      "name": "temp",
+      "params": [],
+      "result": [
+        {
+          "key": "present",
+          "type": "boolean"
+        },
+        {
+          "key": "cpu_c",
+          "type": "number"
+        },
+        {
+          "key": "gpu_c",
+          "type": "number"
+        },
+        {
+          "key": "max_c",
+          "type": "number"
+        }
+      ],
+      "permission": "system:read"
+    },
+    {
+      "name": "fan",
+      "params": [],
+      "result": [
+        {
+          "key": "present",
+          "type": "boolean"
+        },
+        {
+          "key": "count",
+          "type": "integer"
+        },
+        {
+          "key": "rpm",
+          "type": "number"
+        }
+      ],
+      "permission": "system:read"
+    },
+    {
+      "name": "network",
+      "params": [],
+      "result": [
+        {
+          "key": "rx_bytes_per_sec",
+          "type": "number"
+        },
+        {
+          "key": "tx_bytes_per_sec",
+          "type": "number"
+        },
+        {
+          "key": "rx_total",
+          "type": "integer"
+        },
+        {
+          "key": "tx_total",
+          "type": "integer"
+        }
+      ],
+      "permission": "system:read"
     }
+  ],
+  "backend": {
+    "kind": "stdio",
+    "path": "dist/sysmon",
+    "targets": [
+      "darwin-arm64"
+    ],
+    "capabilities": [
+      "fs:read:/proc",
+      "fs:read:/sys",
+      "net:none"
+    ],
+    "emits": [
+      "cpu"
+    ]
   }
 }
